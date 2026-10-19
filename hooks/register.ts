@@ -1,5 +1,5 @@
 import type { EngineInterface, ProcessSpawnChunk, Register, TurnStepChunk, TurnStepResult, TurnUsage } from 'claude-code'
-import { type CommandEvent, type MirroredCall, mirrorCommand, mirrorPatch, type PatchEvent } from './lib/mirror'
+import { commandInput, type CommandEvent, type MirroredCall, mirrorCommand, mirrorPatch, type PatchEvent } from './lib/mirror'
 import { movedLast, pluginsAfter } from './lib/order'
 import {
   AGENT_NAME,
@@ -31,6 +31,7 @@ type HelperEvent = { type: string; [key: string]: unknown }
 type StepAnswer = AsyncGenerator<TurnStepChunk, TurnStepResult | void>
 
 const HELPER = 'bin/codex-agent.mjs'
+const CALL_PREFIX = 'toolu_codexbridge_'
 // The Claude tools a codex agent's transcript shows: codex's work mirrored as
 // Bash, Edit and Write, and its own reach to Claude through SendMessage,
 // which runs for real, as a subagent's does.
@@ -91,25 +92,40 @@ class Runner {
     }
   }
 
-  /** Every event so far, waiting for one when there is none; [] once the helper ended. */
-  async take(signal: AbortSignal): Promise<HelperEvent[]> {
+  private async pull(signal: AbortSignal) {
+    let onAbort: () => void = () => undefined
     const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(new Error('aborted'))
       if (signal.aborted) reject(new Error('aborted'))
-      signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+      signal.addEventListener('abort', onAbort, { once: true })
     })
     aborted.catch(() => undefined)
-    while (this.queue.length === 0 && !this.ended) {
-      try {
-        const pulled = await Promise.race([this.pieces.next(), aborted])
-        if (pulled.done) this.ended = true
-        else this.read(pulled.value)
-      } catch (err) {
-        if (signal.aborted) throw err
-        this.queue.push({ type: 'error', message: err instanceof Error ? err.message : String(err) })
-        this.ended = true
-      }
+    try {
+      const pulled = await Promise.race([this.pieces.next(), aborted])
+      if (pulled.done) this.ended = true
+      else this.read(pulled.value)
+    } catch (err) {
+      if (signal.aborted) throw err
+      this.queue.push({ type: 'error', message: err instanceof Error ? err.message : String(err) })
+      this.ended = true
+    } finally {
+      signal.removeEventListener('abort', onAbort)
     }
+  }
+
+  /** Every event so far, waiting for one when there is none; [] once the helper ended. */
+  async take(signal: AbortSignal): Promise<HelperEvent[]> {
+    while (this.queue.length === 0 && !this.ended) await this.pull(signal)
     return this.queue.splice(0)
+  }
+
+  async takeMatching(match: (e: HelperEvent) => boolean, signal: AbortSignal): Promise<HelperEvent | undefined> {
+    for (;;) {
+      const index = this.queue.findIndex(match)
+      if (index >= 0) return this.queue.splice(index, 1)[0]
+      if (this.ended || this.queue.some(event => event.type === 'final' || event.type === 'error')) return undefined
+      await this.pull(signal)
+    }
   }
 
   putBack(events: HelperEvent[]) {
@@ -136,6 +152,8 @@ type AgentState = {
   carried?: string
   /** SendMessage calls made for codex: tool_use_id -> codex call id. */
   calls: Map<string, string>
+  /** Commands codex is running, shown as Bash calls that wait for their end: codex item id -> tool_use_id. */
+  started: Map<string, string>
   usage?: TurnUsage
 }
 
@@ -147,6 +165,8 @@ const otherAgents = new Set<string>()
 const busyNames = new Map<string, string>()
 // Answers for the mirrored tool calls, by tool_use_id.
 const mirrored = new Map<string, MirroredCall['answer']>()
+// Bash calls for commands codex has not finished yet: their answer waits for the end.
+const liveCalls = new Map<string, { agentId: string; item: string }>()
 
 function describeAgent(options: Options): string {
   const show = (value: string | undefined, fallback: string) => (value && value !== 'inherit' ? value : fallback)
@@ -165,7 +185,7 @@ const isCodexType = ($: $, type: string | undefined) => type === `${$.plugin.nam
 function stateOf(agentId: string): AgentState {
   let state = states.get(agentId)
   if (!state) {
-    state = { live: false, pending: [], calls: new Map() }
+    state = { live: false, pending: [], calls: new Map(), started: new Map() }
     states.set(agentId, state)
   }
   return state
@@ -299,7 +319,12 @@ async function startRun($: $, options: Options, agentId: string, description: st
     for (const text of state.pending.splice(0)) void steer($, state, text)
   })
   state.runner = runner
-  state.usage = undefined
+  state.started.clear()
+}
+
+function dropLiveCalls(agentId: string, state: AgentState) {
+  for (const [id, call] of liveCalls) if (call.agentId === agentId) liveCalls.delete(id)
+  state.started.clear()
 }
 
 function releaseName(agentId: string, state: AgentState) {
@@ -323,7 +348,7 @@ function takeUsage(state: AgentState): TurnUsage | null {
   return usage
 }
 
-const callId = () => `toolu_codexbridge_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
+const callId = () => `${CALL_PREFIX}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
 
 /**
  * Streams the running codex turn into this step: codex's messages as text,
@@ -340,6 +365,7 @@ async function* streamRun(
   viaHandback: boolean,
 ): StepAnswer {
   let index = 0
+  let started = false
   const toolUses: { name: string; input: unknown }[] = []
   let text = ''
   const yieldTool = function* (name: string, input: unknown, id = callId()): Generator<TurnStepChunk, string> {
@@ -359,6 +385,10 @@ async function* streamRun(
       const event = events[i]!
       // Text after a tool call waits for the next step, as a model's would.
       if ((event.type === 'message' || event.type === 'note') && toolUses.length > 0) {
+        runner.putBack(events.slice(i))
+        break
+      }
+      if (event.type === 'command-start' && started) {
         runner.putBack(events.slice(i))
         break
       }
@@ -388,8 +418,24 @@ async function* streamRun(
           index++
           break
         }
+        case 'command-start': {
+          const id = yield* yieldTool('Bash', commandInput(String(event.command)))
+          const item = String(event.id)
+          state.started.set(item, id)
+          liveCalls.set(id, { agentId, item })
+          started = true
+          break
+        }
         case 'command': {
           const call = mirrorCommand(event as unknown as CommandEvent)
+          const item = String(event.id)
+          const startedId = state.started.get(item)
+          if (startedId) {
+            mirrored.set(startedId, call.answer)
+            state.started.delete(item)
+            liveCalls.delete(startedId)
+            break
+          }
           const id = yield* yieldTool(call.name, call.input)
           mirrored.set(id, call.answer)
           break
@@ -481,11 +527,24 @@ async function* streamRun(
 }
 
 /** Codex's outcome for a mirrored call. Nothing else runs these tools in a codex agent's loop. */
-async function answerMirrored($: $, e: { tool_use_id: string; agentId?: string }, run: () => Promise<unknown>) {
+async function answerMirrored($: $, e: { tool_use_id: string; agentId?: string }, signal: AbortSignal, run: () => Promise<unknown>) {
   const answer = mirrored.get(e.tool_use_id)
   if (answer) {
     mirrored.delete(e.tool_use_id)
     return answer
+  }
+  const live = liveCalls.get(e.tool_use_id)
+  if (live) {
+    liveCalls.delete(e.tool_use_id)
+    const state = states.get(live.agentId)
+    state?.started.delete(live.item)
+    try {
+      const found = await state?.runner?.takeMatching(event => event.type === 'command' && event.id === live.item, signal)
+      return found ? mirrorCommand(found as unknown as CommandEvent).answer : { deny: 'codex stopped before this command finished' }
+    } catch (err) {
+      if (signal.aborted) return { deny: 'Interrupted' }
+      throw err
+    }
   }
   if (e.agentId && (await codexAgent($, e.agentId))) return { deny: 'codex-bridge: a codex agent runs no Claude tool of its own.' }
   return run()
@@ -532,9 +591,12 @@ export const register: Register = (on, rawOptions) => {
   }).catch(($, e, next) => next(e))
 
   // A mirrored call already ran inside codex: answer it with codex's outcome.
-  on('tool.call', { tool: 'Bash' }, ($, e, next) => answerMirrored($, e, () => next(e)) as never)
-  on('tool.call', { tool: 'Edit' }, ($, e, next) => answerMirrored($, e, () => next(e)) as never)
-  on('tool.call', { tool: 'Write' }, ($, e, next) => answerMirrored($, e, () => next(e)) as never)
+  on('tool.call', { tool: 'Bash' }, ($, e, next) => answerMirrored($, e, next.signal, () => next(e)) as never)
+    .catch(($, e, next) => e.tool_use_id.startsWith(CALL_PREFIX) ? { deny: 'codex-bridge lost the result of this codex call' } : next(e))
+  on('tool.call', { tool: 'Edit' }, ($, e, next) => answerMirrored($, e, next.signal, () => next(e)) as never)
+    .catch(($, e, next) => e.tool_use_id.startsWith(CALL_PREFIX) ? { deny: 'codex-bridge lost the result of this codex call' } : next(e))
+  on('tool.call', { tool: 'Write' }, ($, e, next) => answerMirrored($, e, next.signal, () => next(e)) as never)
+    .catch(($, e, next) => e.tool_use_id.startsWith(CALL_PREFIX) ? { deny: 'codex-bridge lost the result of this codex call' } : next(e))
 
   // A SendMessage the bridge makes for codex was codex's own decision, which
   // no request of Claude's model carries for auto mode's classifier to judge.
@@ -629,6 +691,7 @@ export const register: Register = (on, rawOptions) => {
         state.runner = undefined
       }
       if (state) {
+        dropLiveCalls(agentId, state)
         state.live = false
         releaseName(agentId, state)
       }
@@ -646,6 +709,7 @@ export const register: Register = (on, rawOptions) => {
     if (state?.runner && e.isAborted) {
       state.runner.stop()
       state.runner = undefined
+      dropLiveCalls(e.agentId!, state)
       state.live = false
       releaseName(e.agentId!, state)
     }

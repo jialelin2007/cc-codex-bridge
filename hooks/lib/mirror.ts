@@ -59,11 +59,18 @@ const side = (hunk: Hunk, keep: '-' | '+') =>
     .map(line => line.slice(1))
     .join('\n')
 
+export function commandInput(command: string) {
+  return { command }
+}
+
 export function mirrorCommand(event: CommandEvent): MirroredCall {
-  const input = { command: event.command }
+  const input = commandInput(event.command)
   const failed = event.status === 'declined' || event.status === 'failed' || (event.exitCode !== null && event.exitCode !== 0)
-  const stderr = !failed ? '' : event.status === 'declined' ? 'Command declined by the codex sandbox' : `Exit code ${event.exitCode ?? '?'}`
-  return { name: 'Bash', input, answer: { result: { stdout: event.output, stderr, interrupted: false } } }
+  if (failed) {
+    const text = event.status === 'declined' ? 'Command declined by the codex sandbox' : event.exitCode === null ? 'Command failed' : `Exit code ${event.exitCode}`
+    return { name: 'Bash', input, answer: { deny: text + (event.output ? `\n${event.output}` : '') } }
+  }
+  return { name: 'Bash', input, answer: { result: { stdout: event.output, stderr: '', interrupted: false } } }
 }
 
 /** One call per hunk of an update, a Write per added file, a Bash `rm` per deleted one. */
@@ -76,7 +83,7 @@ export function mirrorPatch(event: PatchEvent): MirroredCall[] {
       return [{ name: 'Write', input, answer: failure ?? { result } }]
     }
     if (change.kind === 'delete') {
-      const input = { command: `rm ${JSON.stringify(change.path)}`, description: 'Delete the file (codex apply_patch)' }
+      const input = { command: `rm ${JSON.stringify(change.path)}`, description: `Delete ${change.path} (codex apply_patch)` }
       return [{ name: 'Bash', input, answer: failure ?? { result: { stdout: '', stderr: '', interrupted: false } } }]
     }
     const hunks = parseHunks(change.diff)
@@ -94,8 +101,8 @@ export function mirrorPatch(event: PatchEvent): MirroredCall[] {
       return { name: 'Edit', input, answer: failure ?? { result } }
     })
     if (change.movePath) {
-      const input = { command: `mv ${JSON.stringify(change.path)} ${JSON.stringify(change.movePath)}`, description: 'Move the file (codex apply_patch)' }
-      calls.push({ name: 'Bash', input, answer: { result: { stdout: '', stderr: '', interrupted: false } } })
+      const input = { command: `mv ${JSON.stringify(change.path)} ${JSON.stringify(change.movePath)}`, description: `Move ${change.path} to ${change.movePath} (codex apply_patch)` }
+      calls.push({ name: 'Bash', input, answer: failure ?? { result: { stdout: '', stderr: '', interrupted: false } } })
     }
     return calls
   })
