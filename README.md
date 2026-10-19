@@ -54,6 +54,13 @@ prompt 第一行可以写 `@codex` 指令，每个键都可省略，插件解析
 - 从子智能体启动到交回报告，`SendMessage({to: <agentId>, message})` 都直接交给 codex：codex 正在跑时通过 `turn/steer` 立即注入；codex 还在启动、这一轮尚未开始时，消息并入第一轮的输入；codex 这一轮刚结束、报告还没交回时，立刻在同一会话里再跑一轮处理它，两轮的报告合并交回。子智能体结束后再发，会在同一个 codex 线程里开新的一轮。
 - `/codex` 斜杠命令列出本项目的 `claude-subagent-*` 会话，并显示当前生效的设置。在 Codex 里可以用 `codex resume claude-subagent-<name>` 打开其中任意一个。
 
+### 和其他 mod 一起用（插件顺序）
+
+插件的钩子按 settings.json 里 `enabledPlugins` 的顺序嵌套，排在前面的在外层。codex 的镜像工具调用由 codex-bridge 自己作答，所以只有排在它**前面**的 mod（例如 agent-radar、mission-control 这类监测子智能体的 mod）能看到这些调用；排在它后面的看不到。codex-bridge 应当排在最后：
+
+- `/codex` 的最后一行会说明当前顺序，以及哪些插件排在它后面。
+- `/codex order` 把 codex-bridge 移到 `~/.claude/settings.json` 的 `enabledPlugins` 末尾，重启 Claude Code 后生效。之后再安装新的 mod，也可以再运行一次。
+
 ## 配置（/config）
 
 插件的设置在 Claude Code 的 `/config` 里，每一项占一行；安装时也会弹出一次设置页。设置保存在 settings.json 的 `pluginConfigs` 下。值为 `inherit` 或留空时，沿用 `~/.codex/config.toml`。
@@ -122,5 +129,6 @@ claude plugin test .          # 运行 hooks/lib/*.test.ts
 - `hooks/register.ts`：钩子接线。注册 agent 类型和 `/codex`，处理 `turn.step` 接管、镜像工具调用的应答（`tool.call`）、`session.send` 消息投递和 `agent.spawn` 参数采集。
 - `hooks/lib/policy.ts`：`@codex` 指令、会话名、设置优先级、权限映射。
 - `hooks/lib/step.ts`：从子智能体记录判断下一步该做什么，以及报告格式。
+- `hooks/lib/order.ts`：插件顺序检查和 `/codex order` 的改写。
 - `hooks/lib/mirror.ts`：把 codex 的命令和文件改动换成对应的 Bash / Edit / Write 调用及其结果。
 - `bin/codex-agent.mjs`：驱动 `codex app-server` 的 Node helper，提供 run / list / config 三个操作，并在 unix socket 上提供 `/steer`、`/tool-result` 和 `/interrupt`。

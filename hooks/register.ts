@@ -1,5 +1,6 @@
 import type { EngineInterface, ProcessSpawnChunk, Register, TurnStepChunk, TurnStepResult, TurnUsage } from 'claude-code'
 import { type CommandEvent, type MirroredCall, mirrorCommand, mirrorPatch, type PatchEvent } from './lib/mirror'
+import { movedLast, pluginsAfter } from './lib/order'
 import {
   AGENT_NAME,
   NAME_PREFIX,
@@ -517,7 +518,8 @@ export const register: Register = (on, rawOptions) => {
     })
     await $.command.register({
       name: 'codex',
-      description: 'codex-bridge: codex subagent sessions of this project, and the settings in force',
+      description: 'codex-bridge: codex subagent sessions of this project, the settings in force; `order` puts the bridge last',
+      argumentHint: '[order]',
     })
     return next(e)
   })
@@ -650,7 +652,16 @@ export const register: Register = (on, rawOptions) => {
     return next(e)
   })
 
-  on('command.run', { command: 'codex' }, async $ => {
+  on('command.run', { command: 'codex' }, async ($, e) => {
+    const settingsFile = `${(await $.env.get('CLAUDE_CONFIG_DIR')) || `${await $.env.get('HOME')}/.claude`}/settings.json`
+    if (e.args.trim() === 'order') {
+      const moved = movedLast(String(await $.fs.read(settingsFile)), $.plugin.name)
+      if (!moved) return { text: `${$.plugin.name} already comes last in ${settingsFile}.` }
+      await $.fs.write(settingsFile, moved)
+      return { text: `Moved ${$.plugin.name} last in enabledPlugins of ${settingsFile}. Restart Claude Code to apply.` }
+    }
+    const userSettings = (await $.settings.read({ source: 'user' })) as { enabledPlugins?: Record<string, unknown> }
+    const after = pluginsAfter(userSettings?.enabledPlugins ?? {}, $.plugin.name)
     const cwd = await $.session.cwd()
     const ask = async (op: string) => {
       const ran = await $.process.run(helperArgv($), {
@@ -679,6 +690,9 @@ export const register: Register = (on, rawOptions) => {
         ? threads.map(t => `  ${t.name}  ${t.id}  ${t.model ?? ''}  ${new Date(t.updatedAt * 1000).toLocaleString()}`)
         : ['  (none yet)']),
       'Open one in Codex: codex resume <name>',
+      after.length === 0
+        ? 'Plugin order: codex-bridge comes last, so every mod sees codex tool calls.'
+        : `Plugin order: ${after.join(', ')} come after codex-bridge and see no codex tool calls; /codex order moves it last.`,
     ]
     return { text: lines.join('\n') }
   })
