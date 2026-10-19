@@ -1,6 +1,6 @@
 {
   "name": "codex-bridge",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Use OpenAI Codex as a Claude Code subagent through the native Agent, SendMessage, ListAgents and TaskStop tools.",
   "author": { "name": "Jiale Lin" },
   "keywords": ["codex", "subagent", "openai", "agents"],

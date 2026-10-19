@@ -21,7 +21,7 @@ Claude ──Agent(subagent_type: "codex-bridge:codex")──► 原生子智能
 ```
 
 - 插件是一个 Claude Code mod（函数钩子插件）。它注册 agent 类型 `codex-bridge:codex`，并用 `turn.step` 钩子接管这个子智能体的每一次模型请求，改由 codex 回答。Claude 侧不消耗模型 token。
-- **工作过程和原生子智能体一样可见**：codex 执行的每条命令显示为一次 `Bash` 调用（带输出），每处文件改动显示为 `Edit`（带 diff），新建文件显示为 `Write`，codex 的中间说明显示为子智能体的文字。这些调用已经在 codex 里执行过，插件直接用 codex 的结果回答，不会在 Claude 侧再执行一遍。
+- **工作过程和原生子智能体一样可见**：codex 执行的每条命令显示为一次 `Bash` 调用，命令一开始就出现、跑完时填入输出，所以长命令运行期间能看到它正在跑什么；失败的命令和原生 Bash 一样显示为错误（`Exit code N` 加输出）。每处文件改动显示为 `Edit`（带 diff），新建文件显示为 `Write`，删除和移动显示为带路径的 `Bash`，codex 的中间说明显示为子智能体的文字。这些调用已经在 codex 里执行过，插件直接用 codex 的结果回答，不会在 Claude 侧再执行一遍。
 - **codex 能主动联系 Claude**：codex 有一个 `send_message` 工具，调用它时插件在子智能体里发起一次真正的 `SendMessage`（默认发给 `main`，也可以发给其他 agent），和原生子智能体发消息完全一样，结果再交回 codex。
 - codex 的回答作为子智能体的最终报告交回。如果当前会话要求子智能体通过 SubagentHandback 交付（例如 auto 模式），就走 SubagentHandback；否则作为子智能体的最后一条文本交回。
 - 报告末尾附一行 `[codex-bridge] codex session … · thread … · rollout …`，Claude 可以据此读取 codex 的完整 rollout。
@@ -60,6 +60,8 @@ prompt 第一行可以写 `@codex` 指令，每个键都可省略，插件解析
 
 - `/codex` 的最后一行会说明当前顺序，以及哪些插件排在它后面。
 - `/codex order` 把 codex-bridge 移到 `~/.claude/settings.json` 的 `enabledPlugins` 末尾，重启 Claude Code 后生效。之后再安装新的 mod，也可以再运行一次。
+
+顺序正确时，这类 mod 看到的 codex 子智能体和原生子智能体一样：启动、结束、每次工具调用、正在运行的命令、命令的成败和耗时、改动的文件。
 
 ## 配置（/config）
 
@@ -117,6 +119,8 @@ claude --plugin-dir /path/to/claude-codex-bridge
 - codex 能用的 Claude 能力只有 `send_message`，对应原生子智能体的 SendMessage；原生子智能体同样没有 ListAgents。
 - codex 的 web 搜索、MCP 调用、计划更新等没有对应的 Claude 工具，在记录里显示为一行文字。
 - `isolation: "remote"` 不适用：远端会话不会加载本机插件。
+- codex 这一轮本身失败时（例如额度用完、模型报错），报告里会写明失败原因，但子智能体在监测 mod 里显示为「完成」而不是「失败」：mod API 目前没有让子智能体以错误结束的方式。
+- codex 用 shell 读文件、搜索时显示为 `Bash`，不会换成 `Read`、`Grep`，所以监测 mod 的文件列表里只有 codex 改动过的文件。
 - mod API 和 `codex app-server` 协议都还在演进，升级 Claude Code 或 codex 后如有问题，先运行 `claude plugin validate` 和下面的测试。
 
 ## 开发

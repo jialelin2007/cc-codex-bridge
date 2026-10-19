@@ -17,7 +17,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-const VERSION = '0.2.0'
+const VERSION = '0.2.2'
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
 const OUTPUT_LIMIT = 30_000
 const NOTE_LIMIT = 600
@@ -486,6 +486,7 @@ async function run(req) {
     switch (method) {
       case 'item/started':
         if (params.item?.type !== 'agentMessage' && params.item?.type !== 'reasoning') flushMessage()
+        if (params.item?.type === 'commandExecution') emit({ type: 'command-start', id: params.item.id, command: innerCommand(params.item) })
         break
       case 'item/completed': {
         const item = params.item
