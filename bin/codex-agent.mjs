@@ -17,7 +17,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-const VERSION = '0.2.2'
+const VERSION = '0.2.3'
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
 const OUTPUT_LIMIT = 30_000
 const NOTE_LIMIT = 600
@@ -409,8 +409,10 @@ async function run(req) {
   const early = []
   // `call` events waiting for Claude's answer, by codex's call id.
   const calls = new Map()
-  // Commands the app server reported this turn, and code-mode scripts seen in the rollout.
+  // Commands the app server reported this turn, from their start (a script may
+  // return while one still runs), and code-mode scripts seen in the rollout.
   const reported = []
+  const startedItems = new Set()
   const scripts = new Map()
   let tail
 
@@ -486,7 +488,12 @@ async function run(req) {
     switch (method) {
       case 'item/started':
         if (params.item?.type !== 'agentMessage' && params.item?.type !== 'reasoning') flushMessage()
-        if (params.item?.type === 'commandExecution') emit({ type: 'command-start', id: params.item.id, command: innerCommand(params.item) })
+        if (params.item?.type === 'commandExecution') {
+          const command = innerCommand(params.item)
+          startedItems.add(params.item.id)
+          reported.push(command)
+          emit({ type: 'command-start', id: params.item.id, command })
+        }
         break
       case 'item/completed': {
         const item = params.item
@@ -498,7 +505,7 @@ async function run(req) {
           break
         }
         const event = item && describeItem(item)
-        if (event?.type === 'command') reported.push(event.command)
+        if (event?.type === 'command' && !startedItems.has(event.id)) reported.push(event.command)
         if (event) emit(event)
         break
       }
