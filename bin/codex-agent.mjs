@@ -174,12 +174,11 @@ function innerCommand(item) {
 function describeItem(item) {
   switch (item.type) {
     case 'commandExecution': {
-      const output = String(item.aggregatedOutput ?? '')
       return {
         type: 'command',
         id: item.id,
         command: innerCommand(item),
-        output: output.length > OUTPUT_LIMIT ? output.slice(0, OUTPUT_LIMIT) + '\n… (output truncated)' : output,
+        output: truncate(String(item.aggregatedOutput ?? '')),
         exitCode: item.exitCode ?? null,
         status: item.status,
         durationMs: item.durationMs ?? null,
@@ -204,6 +203,95 @@ function describeItem(item) {
       return { type: 'note', text: '(codex compacted its context)' }
     default:
       return undefined
+  }
+}
+
+const truncate = output => (output.length > OUTPUT_LIMIT ? output.slice(0, OUTPUT_LIMIT) + '\n… (output truncated)' : output)
+
+// The shell commands a code-mode `exec` script runs, where it spells them out.
+function scriptCommands(script) {
+  const commands = []
+  for (const match of String(script).matchAll(/exec_command\(\s*\{[^}]*?\bcmd\s*:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g)) {
+    const literal = match[1]
+    try {
+      commands.push(literal.startsWith('"') ? JSON.parse(literal) : literal.slice(1, -1).replace(/\\(.)/g, '$1'))
+    } catch {}
+  }
+  return commands
+}
+
+// The JSON objects a script printed back to back (`text(JSON.stringify(r))`).
+function printedObjects(text) {
+  const objects = []
+  let depth = 0
+  let start = -1
+  let quoted = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (quoted) {
+      if (c === '\\') i++
+      else if (c === '"') quoted = false
+    } else if (c === '"') quoted = depth > 0
+    else if (c === '{' && depth++ === 0) start = i
+    else if (c === '}' && depth > 0 && --depth === 0) {
+      try {
+        objects.push(JSON.parse(text.slice(start, i + 1)))
+      } catch {}
+    }
+  }
+  return objects
+}
+
+/**
+ * Reads what codex appends to the thread's rollout file. Code mode runs shell
+ * commands inside an `exec` script, and the app server reports some of them
+ * as no item (a command the sandbox refused, say); the rollout has the script.
+ */
+class RolloutTail {
+  constructor(file) {
+    this.file = file
+    this.rest = Buffer.alloc(0)
+    try {
+      this.offset = fs.statSync(file).size
+    } catch {
+      this.offset = 0
+    }
+  }
+
+  read() {
+    let fd
+    try {
+      fd = fs.openSync(this.file, 'r')
+    } catch {
+      return []
+    }
+    try {
+      const size = fs.fstatSync(fd).size
+      if (size <= this.offset) return []
+      const chunk = Buffer.alloc(size - this.offset)
+      fs.readSync(fd, chunk, 0, chunk.length, this.offset)
+      this.offset = size
+      const bytes = Buffer.concat([this.rest, chunk])
+      const end = bytes.lastIndexOf(0x0a)
+      if (end < 0) {
+        this.rest = bytes
+        return []
+      }
+      this.rest = bytes.subarray(end + 1)
+      return bytes
+        .subarray(0, end)
+        .toString('utf8')
+        .split('\n')
+        .flatMap(line => {
+          try {
+            return [JSON.parse(line)]
+          } catch {
+            return []
+          }
+        })
+    } finally {
+      fs.closeSync(fd)
+    }
   }
 }
 
@@ -321,6 +409,64 @@ async function run(req) {
   const early = []
   // `call` events waiting for Claude's answer, by codex's call id.
   const calls = new Map()
+  // Commands the app server reported this turn, and code-mode scripts seen in the rollout.
+  const reported = []
+  const scripts = new Map()
+  let tail
+
+  // A script whose commands the app server did not all report shows as one command.
+  const readRollout = () => {
+    for (const line of tail?.read() ?? []) {
+      const payload = line.type === 'response_item' ? line.payload : undefined
+      if (payload?.type === 'custom_tool_call' && payload.name === 'exec') {
+        scripts.set(payload.call_id, String(payload.input ?? ''))
+        continue
+      }
+      if (payload?.type !== 'custom_tool_call_output' || !scripts.has(payload.call_id)) continue
+      const script = scripts.get(payload.call_id)
+      scripts.delete(payload.call_id)
+      if (!/exec_command\(/.test(script)) continue
+      const commands = scriptCommands(script)
+      const missing = commands.filter(command => {
+        const at = reported.indexOf(command)
+        if (at < 0) return true
+        reported.splice(at, 1)
+        return false
+      })
+      if (commands.length > 0 && missing.length === 0) continue
+      const parts = Array.isArray(payload.output) ? payload.output.map(part => String(part?.text ?? '')) : [String(payload.output ?? '')]
+      if (/^Script \w+/.test(parts[0] ?? '')) parts.shift()
+      const printed = printedObjects(parts.join(''))
+      // Where the script printed each command's result, each shows on its own.
+      const outputs = printed.filter(o => typeof o?.output === 'string')
+      const results = missing.map(
+        (command, i) => outputs.find(o => o.command === command) ?? (outputs.length === missing.length ? outputs[i] : undefined),
+      )
+      if (missing.length > 0 && results.every(Boolean)) {
+        missing.forEach((command, i) =>
+          emit({
+            type: 'command',
+            id: `${payload.call_id}-${i}`,
+            command,
+            output: truncate(results[i].output),
+            exitCode: typeof results[i].exit_code === 'number' ? results[i].exit_code : null,
+            status: 'completed',
+            durationMs: null,
+          }),
+        )
+        continue
+      }
+      emit({
+        type: 'command',
+        id: payload.call_id,
+        command: missing.length > 0 ? missing.join('\n') : script,
+        output: truncate(parts.join('')),
+        exitCode: null,
+        status: 'completed',
+        durationMs: null,
+      })
+    }
+  }
 
   const server = new AppServer(req.codexPath || 'codex', req.cwd, (method, params) => {
     if (method !== 'item/tool/call') return answerServerRequest(method)
@@ -351,6 +497,7 @@ async function run(req) {
           break
         }
         const event = item && describeItem(item)
+        if (event?.type === 'command') reported.push(event.command)
         if (event) emit(event)
         break
       }
@@ -440,6 +587,7 @@ async function run(req) {
     const opened = await openThread(server, req)
     const { response } = opened
     threadId = response.thread.id
+    if (response.thread.path) tail = new RolloutTail(response.thread.path)
     const effort =
       req.effort ??
       (req.effortStep ? shiftEffort(req.defaultEffort ?? response.reasoningEffort, req.effortStep) : undefined) ??
@@ -469,12 +617,16 @@ async function run(req) {
     emit({ type: 'turn', turnId })
     for (const text of early.splice(0)) await steer(text)
 
+    const tailing = setInterval(readRollout, 300)
     const turn = await Promise.race([
       done,
       server.exited.then(({ code, signal }) => {
         throw new Error(`codex app-server exited (${signal ?? code}): ${clip(server.stderr, 400)}`)
       }),
-    ])
+    ]).finally(() => clearInterval(tailing))
+    // The rollout's last lines can land just after the turn's end.
+    await new Promise(resolve => setTimeout(resolve, 200))
+    readRollout()
     const final = pendingMessage ?? lastMessage
     pendingMessage = undefined
     emit({
