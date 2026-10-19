@@ -2,7 +2,7 @@
 // Drives `codex app-server` (JSON-RPC over stdio) for the codex-bridge plugin.
 //
 // Reads one JSON request on stdin and writes JSONL events on stdout:
-//   op "run"    -> ready, thread, turn, (message | command | patch | note | call | steered)*, final
+//   op "run"    -> ready, thread, turn, (message | command | patch | note | call | steered | usage)*, final
 //   op "list"   -> threads   (claude-subagent-* threads of a cwd)
 //   op "config" -> config    (codex's effective config for a cwd)
 // While a run is in flight, the unix socket named by `controlSocket` takes
@@ -24,31 +24,25 @@ const NOTE_LIMIT = 600
 // thread/list only shows interactive sources unless told otherwise.
 const SOURCE_KINDS = ['cli', 'vscode', 'exec', 'appServer', 'unknown']
 
-// Tools codex gets for reaching Claude; the plugin answers them with Claude's
-// own SendMessage and ListAgents, run in the codex agent's loop.
+// The tool codex gets for reaching Claude; the plugin answers it with Claude's
+// own SendMessage, run in the codex agent's loop as a subagent's would be.
 const CLAUDE_TOOLS = [
   {
     type: 'function',
     name: 'send_message',
     description:
-      'Send a message to Claude, the lead agent that delegated your task (to: "main", the default), or to another agent of the same Claude Code session by the name or id list_agents shows. ' +
+      'Send a message to Claude, the lead agent that delegated your task (to: "main", the default), or to another agent of the same Claude Code session by its name or id. ' +
       'Use it to report progress, raise a blocker or ask a question while you keep working; answers arrive as new messages in this conversation. Your final message is still your report.',
     inputSchema: {
       type: 'object',
       properties: {
-        to: { type: 'string', description: 'Recipient: "main" for Claude, or an agent name or id from list_agents.' },
+        to: { type: 'string', description: 'Recipient: "main" for Claude, or another agent\'s name or id.' },
         message: { type: 'string', description: 'Plain text; make the first line a self-contained sentence.' },
         summary: { type: 'string', description: 'A 5-10 word label for the message.' },
       },
       required: ['message'],
       additionalProperties: false,
     },
-  },
-  {
-    type: 'function',
-    name: 'list_agents',
-    description: 'List the agents of the Claude Code session that delegated your task (subagents, teammates) and its peer sessions, with the names send_message takes.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
 ]
 

@@ -31,10 +31,10 @@ type StepAnswer = AsyncGenerator<TurnStepChunk, TurnStepResult | void>
 
 const HELPER = 'bin/codex-agent.mjs'
 // The Claude tools a codex agent's transcript shows: codex's work mirrored as
-// Bash, Edit and Write, and its own reach to Claude through SendMessage and
-// ListAgents, which run for real.
-const AGENT_TOOLS = ['Bash', 'Edit', 'Write', 'SendMessage', 'ListAgents']
-const OUTBOUND: Record<string, string> = { send_message: 'SendMessage', list_agents: 'ListAgents' }
+// Bash, Edit and Write, and its own reach to Claude through SendMessage,
+// which runs for real, as a subagent's does.
+const AGENT_TOOLS = ['Bash', 'Edit', 'Write', 'SendMessage']
+const OUTBOUND: Record<string, string> = { send_message: 'SendMessage' }
 
 // If the bridge ever fails to answer a step, this is what the stand-in model reads.
 const FALLBACK_PROMPT =
@@ -44,10 +44,15 @@ const FALLBACK_PROMPT =
 // What the Agent call said that its loop does not: kept from `agent.spawn`.
 type SpawnFacts = { description: string; permissionMode?: string; cwd?: string; effort?: string }
 
-/** A helper process running one codex turn, read in the background across the agent's steps. */
+/**
+ * A helper process running one codex turn. The agent's steps read it in
+ * turn, each pulling the stream itself: a pull is the engine's call in
+ * flight, so a long wait on codex costs no step its time budget.
+ */
 class Runner {
   private queue: HelperEvent[] = []
-  private wake: (() => void) | undefined
+  private buffer = ''
+  private pieces: AsyncIterator<ProcessSpawnChunk>
   ready = false
   ended = false
   stderr = ''
@@ -58,51 +63,50 @@ class Runner {
     readonly socket: string,
     private onReady: () => void,
   ) {
-    void this.pump()
+    this.pieces = (stream as AsyncIterable<ProcessSpawnChunk>)[Symbol.asyncIterator]()
   }
 
-  private async pump() {
-    let buffer = ''
-    try {
-      for await (const piece of this.stream as AsyncIterable<ProcessSpawnChunk>) {
-        if (piece.stream === 'stderr') {
-          this.stderr = (this.stderr + piece.text).slice(-2000)
-          continue
-        }
-        buffer += piece.text
-        for (let nl = buffer.indexOf('\n'); nl >= 0; nl = buffer.indexOf('\n')) {
-          const line = buffer.slice(0, nl)
-          buffer = buffer.slice(nl + 1)
-          let event: HelperEvent
-          try {
-            event = JSON.parse(line)
-          } catch {
-            continue
-          }
-          if (event.type === 'ready') {
-            this.ready = true
-            this.onReady()
-            continue
-          }
-          this.queue.push(event)
-          this.wake?.()
-        }
-      }
-    } catch (err) {
-      if (!this.ended) this.queue.push({ type: 'error', message: err instanceof Error ? err.message : String(err) })
+  private read(piece: ProcessSpawnChunk) {
+    if (piece.stream === 'stderr') {
+      this.stderr = (this.stderr + piece.text).slice(-2000)
+      return
     }
-    this.ended = true
-    this.wake?.()
+    this.buffer += piece.text
+    for (let nl = this.buffer.indexOf('\n'); nl >= 0; nl = this.buffer.indexOf('\n')) {
+      const line = this.buffer.slice(0, nl)
+      this.buffer = this.buffer.slice(nl + 1)
+      let event: HelperEvent
+      try {
+        event = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (event.type === 'ready') {
+        this.ready = true
+        this.onReady()
+      } else {
+        this.queue.push(event)
+      }
+    }
   }
 
   /** Every event so far, waiting for one when there is none; [] once the helper ended. */
   async take(signal: AbortSignal): Promise<HelperEvent[]> {
+    const aborted = new Promise<never>((_, reject) => {
+      if (signal.aborted) reject(new Error('aborted'))
+      signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+    })
+    aborted.catch(() => undefined)
     while (this.queue.length === 0 && !this.ended) {
-      if (signal.aborted) throw new Error('aborted')
-      await new Promise<void>((resolve, reject) => {
-        this.wake = resolve
-        signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
-      })
+      try {
+        const pulled = await Promise.race([this.pieces.next(), aborted])
+        if (pulled.done) this.ended = true
+        else this.read(pulled.value)
+      } catch (err) {
+        if (signal.aborted) throw err
+        this.queue.push({ type: 'error', message: err instanceof Error ? err.message : String(err) })
+        this.ended = true
+      }
     }
     return this.queue.splice(0)
   }
@@ -129,7 +133,7 @@ type AgentState = {
   runner?: Runner
   /** The report of this run's earlier codex turns, when late messages ran more. */
   carried?: string
-  /** SendMessage and ListAgents calls made for codex: tool_use_id -> codex call id. */
+  /** SendMessage calls made for codex: tool_use_id -> codex call id. */
   calls: Map<string, string>
   usage?: TurnUsage
 }
@@ -486,7 +490,7 @@ async function answerMirrored($: $, e: { tool_use_id: string; agentId?: string }
   return run()
 }
 
-/** Gives codex what Claude's SendMessage and ListAgents answered for it last step. */
+/** Gives codex what the SendMessage calls made for it answered last step. */
 async function answerCalls($: $, state: AgentState, rows: readonly Row[]) {
   if (state.calls.size === 0 || !state.runner) return
   for (const row of rows.slice(-4)) {
@@ -529,6 +533,14 @@ export const register: Register = (on, rawOptions) => {
   on('tool.call', { tool: 'Bash' }, ($, e, next) => answerMirrored($, e, () => next(e)) as never)
   on('tool.call', { tool: 'Edit' }, ($, e, next) => answerMirrored($, e, () => next(e)) as never)
   on('tool.call', { tool: 'Write' }, ($, e, next) => answerMirrored($, e, () => next(e)) as never)
+
+  // A SendMessage the bridge makes for codex was codex's own decision, which
+  // no request of Claude's model carries for auto mode's classifier to judge.
+  on('tool.check', { tool: 'SendMessage' }, ($, e, next) => {
+    const state = e.agentId ? states.get(e.agentId) : undefined
+    if (e.tool_use_id && state?.calls.has(e.tool_use_id)) return { decision: 'allow', reason: 'codex-bridge: a message from the codex agent' }
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('agent.spawn', async ($, e, next) => {
     if (!isCodexType($, e.subagentType)) return next(e)
@@ -585,7 +597,8 @@ export const register: Register = (on, rawOptions) => {
 
       if (state.runner) {
         await answerCalls($, state, rows)
-        for (const text of newInstructions(rows, messages)) await steer($, state, text)
+        const waiting = [...newInstructions(rows, messages), ...(state.runner.ready ? state.pending.splice(0) : [])]
+        for (const text of waiting) await steer($, state, text)
         return yield* streamRun($, options, e, next.signal, agentId, state, viaHandback)
       }
 
@@ -617,7 +630,7 @@ export const register: Register = (on, rawOptions) => {
         state.live = false
         releaseName(agentId, state)
       }
-      if (next.signal.aborted) return
+      if (next.signal.aborted) return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
       const text = `⚠ codex-bridge failed: ${err instanceof Error ? err.message : String(err)}`
       yield { kind: 'text', index: 0, text }
       yield { kind: 'stop', stopReason: 'end_turn', usage: null }
