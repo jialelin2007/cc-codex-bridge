@@ -10,9 +10,11 @@ import {
   slug,
 } from './lib/policy'
 import {
+  type ApiMessage,
   type FinalEvent,
   formatReport,
   HANDBACK,
+  handbackActive,
   lastReport,
   planStep,
   type Row,
@@ -34,7 +36,7 @@ const HELPER = 'bin/codex-agent.mjs'
 // If the bridge ever fails to answer a step, this is what the stand-in model reads.
 const FALLBACK_PROMPT =
   'You stand in for an OpenAI Codex agent served by the codex-bridge plugin, which failed to take over this turn. ' +
-  'Do no work. Call SubagentHandback with the message "codex-bridge error: the Codex bridge did not handle this turn; check that the plugin is loaded and node and codex are on PATH."'
+  'Do no work. Your whole report is: "codex-bridge error: the Codex bridge did not handle this turn; check that the plugin is loaded and that node and codex are on PATH."'
 
 const states = new Map<string, AgentState>()
 const spawns = new Map<string, SpawnFacts>()
@@ -246,10 +248,16 @@ export const register: Register = (on, rawOptions) => {
     return result
   }).catch(($, e, next) => next(e))
 
-  // A message for a codex agent mid-turn goes straight into that turn.
-  on('session.receive', async ($, e, next) => {
-    const socket = e.agentId ? states.get(e.agentId)?.socket : undefined
-    if (!socket) return next(e)
+  // SendMessage to a codex agent mid-turn goes straight into that turn;
+  // otherwise it queues as for any agent, and the next run picks it up.
+  on('session.send', async ($, e, next) => {
+    let agentId = states.get(e.to)?.socket ? e.to : undefined
+    if (!agentId) {
+      const named = (await $.agent.list()).find(a => a.name === e.to || a.id === e.to)
+      if (named && states.get(named.id)?.socket) agentId = named.id
+    }
+    const socket = agentId ? states.get(agentId)?.socket : undefined
+    if (!agentId || !socket) return next(e)
     try {
       const sent = await $.http.fetch('http://codex-bridge/steer', {
         method: 'POST',
@@ -257,7 +265,7 @@ export const register: Register = (on, rawOptions) => {
         body: JSON.stringify({ text: e.text }),
         socketPath: socket,
       })
-      if (sent.ok) return { consumed: 'delivered to the running codex turn' }
+      if (sent.ok) return { isDelivered: true }
     } catch {}
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -270,23 +278,34 @@ export const register: Register = (on, rawOptions) => {
     if (!agent) return yield* next(e)
 
     let report: string
+    let viaHandback = false
     try {
       const rows = (await $.session.messages({ agentId })) as readonly Row[]
+      const api = await $.session.messages({ agentId, as: 'api' })
+      const messages = Array.isArray(api) ? (api as readonly ApiMessage[]) : []
+      viaHandback = handbackActive(messages)
       const state = await loadState($, agentId, rows)
-      const plan = planStep(rows, state.report)
+      const plan = planStep(rows, messages, state.report)
       if (plan.kind === 'text') {
         const text = plan.text || 'Report delivered.'
         yield { kind: 'text', index: 0, text }
         yield { kind: 'stop', stopReason: 'end_turn', usage: null }
         return { turnId: e.turnId, index: e.index, answer: text, toolUses: [], stopReason: 'end_turn', usage: null }
       }
-      report = plan.kind === 'handback' ? plan.report : await runCodex($, options, agentId, agent.description, plan.input, state)
+      report = plan.kind === 'deliver' ? plan.report : await runCodex($, options, agentId, agent.description, plan.input, state)
     } catch (err) {
       if (next.signal.aborted) return
       report = `⚠ codex-bridge failed: ${err instanceof Error ? err.message : String(err)}`
     }
     if (next.signal.aborted) return
 
+    // Where the engine asks for SubagentHandback the report goes through it;
+    // elsewhere an agent's last text is its result.
+    if (!viaHandback) {
+      yield { kind: 'text', index: 0, text: report }
+      yield { kind: 'stop', stopReason: 'end_turn', usage: null }
+      return { turnId: e.turnId, index: e.index, answer: report, toolUses: [], stopReason: 'end_turn', usage: null }
+    }
     const input = { message: report }
     yield { kind: 'tool', index: 0, id: answerId(), name: HANDBACK }
     yield { kind: 'input', index: 0, json: JSON.stringify(input) }

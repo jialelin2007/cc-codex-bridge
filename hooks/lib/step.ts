@@ -11,34 +11,64 @@ export type Row = {
   toolResults?: readonly { tool_use_id: string; text: string }[]
 }
 
+/** The same conversation as the next request carries it (`as: 'api'`): reminders included. */
+export type ApiMessage = { role: 'user' | 'assistant'; content: readonly { type: string; text?: string }[] }
+
 export type StepPlan =
   | { kind: 'run'; input: string }
-  | { kind: 'handback'; report: string }
+  | { kind: 'deliver'; report: string }
   | { kind: 'text'; text: string }
 
 // Rows the engine writes itself, which are no instruction for codex.
 const ENGINE_NOTE = /^\s*\[(?:handback-[a-z-]+|Request interrupted[^\]]*)\]/
+// How a message sent to a busy agent reaches it: as a row, or as a reminder.
+const RELAYED = /The coordinator sent a message while you were working:\n([\s\S]*?)\n\nAddress this before completing your current task\./
+
+const lastAssistant = (messages: readonly { role: string }[]) => {
+  let at = messages.length - 1
+  while (at >= 0 && messages[at]!.role !== 'assistant') at--
+  return at
+}
+
+/** True when the engine told this agent to report through SubagentHandback. */
+export function handbackActive(api: readonly ApiMessage[]): boolean {
+  return api.some(m => m.role === 'user' && m.content.some(b => b.type === 'text' && b.text?.includes(`${HANDBACK}(`)))
+}
 
 export function lastReport(rows: readonly Row[]): string | undefined {
   for (let i = rows.length - 1; i >= 0; i--) {
     const use = rows[i]!.toolUses.find(u => u.tool === HANDBACK)
     if (use && typeof use.input.message === 'string') return use.input.message
+    if (rows[i]!.role === 'assistant' && rows[i]!.text.includes('[codex-bridge]')) return rows[i]!.text
   }
   return undefined
 }
 
+/** What Claude asked since the agent last answered: new rows, and messages relayed as reminders. */
+export function newInstructions(rows: readonly Row[], api: readonly ApiMessage[]): string[] {
+  const fromRows = rows
+    .slice(lastAssistant(rows) + 1)
+    .filter(r => r.role === 'user' && r.text.trim() !== '' && !ENGINE_NOTE.test(r.text))
+    .map(r => RELAYED.exec(r.text)?.[1] ?? r.text)
+  const fromReminders = api
+    .slice(lastAssistant(api) + 1)
+    .flatMap(m => m.content)
+    .flatMap(b => (b.type === 'text' && b.text?.trimStart().startsWith('<system-reminder') ? [RELAYED.exec(b.text)?.[1]] : []))
+    .filter((text): text is string => text !== undefined)
+  return [...new Set([...fromRows, ...fromReminders].map(text => text.trim()).filter(Boolean))]
+}
+
 /**
- * New instructions since the agent last spoke run codex; an engine nudge
+ * New instructions since the agent last answered run codex; an engine nudge
  * gets the last report again; anything else ends the turn quietly.
  */
-export function planStep(rows: readonly Row[], knownReport?: string): StepPlan {
-  let last = rows.length - 1
-  while (last >= 0 && rows[last]!.role !== 'assistant') last--
-  const fresh = rows.slice(last + 1).filter(r => r.role === 'user' && r.text.trim() !== '')
-  const instructions = fresh.filter(r => !ENGINE_NOTE.test(r.text)).map(r => r.text.trim())
+export function planStep(rows: readonly Row[], api: readonly ApiMessage[], knownReport?: string): StepPlan {
+  const instructions = newInstructions(rows, api)
   if (instructions.length > 0) return { kind: 'run', input: instructions.join('\n\n') }
 
+  const last = lastAssistant(rows)
   const report = knownReport ?? lastReport(rows) ?? ''
+  const nudged = rows.slice(last + 1).some(r => r.role === 'user' && ENGINE_NOTE.test(r.text))
   const handback = last >= 0 ? rows[last]!.toolUses.find(u => u.tool === HANDBACK) : undefined
   if (handback) {
     const answer =
@@ -48,12 +78,12 @@ export function planStep(rows: readonly Row[], knownReport?: string): StepPlan {
         .flatMap(r => r.toolResults ?? [])
         .find(t => t.tool_use_id === handback.tool_use_id)?.text ??
       ''
-    // Hand-back is off for this agent: its plain text is the report.
-    if (/not active/.test(answer)) return { kind: 'text', text: report }
-    if (fresh.length > 0) return { kind: 'handback', report }
+    // No hand-back for this agent after all: its plain text is the report.
+    if (/not active|No such tool/.test(answer)) return { kind: 'text', text: report }
+    if (nudged) return { kind: 'deliver', report }
     return { kind: 'text', text: '' }
   }
-  if (fresh.length > 0 && report) return { kind: 'handback', report }
+  if (nudged && report) return { kind: 'deliver', report }
   return { kind: 'text', text: report }
 }
 
