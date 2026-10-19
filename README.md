@@ -85,14 +85,16 @@ prompt 第一行可以写 `@codex` 指令，每个键都可省略，插件解析
 在 Claude Code 终端里：
 
 ```
-/plugin install codex-bridge --marketplace <owner>/<repo>
+/plugin install codex-bridge --marketplace jialelin2007/claude-codex-bridge
 ```
 
 或在 shell 里：
 
 ```
-claude plugin install codex-bridge --marketplace <owner>/<repo>
+claude plugin install codex-bridge --marketplace jialelin2007/claude-codex-bridge
 ```
+
+仓库是私有的：安装的机器上需要有能读取它的 GitHub 凭据（例如先运行 `gh auth login`，再运行 `gh auth setup-git`），安装过程不会提示输入凭据。
 
 开发时直接从目录加载：
 
