@@ -7,7 +7,7 @@ export const HANDBACK = 'SubagentHandback'
 export type Row = {
   role: 'user' | 'assistant'
   text: string
-  toolUses: readonly { tool_use_id: string; tool: string; input: Record<string, unknown>; text?: string }[]
+  toolUses: readonly { tool_use_id: string; tool: string; input: Record<string, unknown>; text?: string; isError?: true }[]
   toolResults?: readonly { tool_use_id: string; text: string }[]
 }
 
