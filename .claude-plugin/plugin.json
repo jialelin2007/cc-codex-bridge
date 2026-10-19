@@ -1,0 +1,49 @@
+{
+  "name": "codex-bridge",
+  "version": "0.1.0",
+  "description": "Use OpenAI Codex as a Claude Code subagent through the native Agent, SendMessage, ListAgents and TaskStop tools.",
+  "author": { "name": "Jiale Lin" },
+  "keywords": ["codex", "subagent", "openai", "agents"],
+  "userConfig": {
+    "fast": {
+      "type": "string",
+      "title": "Codex fast mode",
+      "description": "on: priority service tier; off: default tier; inherit: whatever ~/.codex/config.toml says.",
+      "options": ["inherit", "on", "off"],
+      "default": "inherit"
+    },
+    "model": {
+      "type": "string",
+      "title": "Codex default model",
+      "description": "Model for new codex subagent sessions (e.g. gpt-6-astra). Empty: codex's own default. Claude can still pick one with `@codex model=...`.",
+      "default": ""
+    },
+    "effort": {
+      "type": "string",
+      "title": "Codex default reasoning effort",
+      "description": "Effort for new codex subagent sessions unless Claude passes one. inherit: codex's own default.",
+      "options": ["inherit", "low", "medium", "high", "xhigh", "max", "ultra"],
+      "default": "inherit"
+    },
+    "sandbox": {
+      "type": "string",
+      "title": "Codex sandbox",
+      "description": "follow-claude: plan -> read-only, bypassPermissions -> danger-full-access, otherwise workspace-write. inherit: ~/.codex/config.toml.",
+      "options": ["follow-claude", "inherit", "read-only", "workspace-write", "danger-full-access"],
+      "default": "follow-claude"
+    },
+    "approval": {
+      "type": "string",
+      "title": "Codex approvals",
+      "description": "Nobody can answer codex's prompts from a subagent. follow-claude: auto mode -> codex auto-review, otherwise never. inherit: ~/.codex/config.toml.",
+      "options": ["follow-claude", "inherit", "never", "auto-review"],
+      "default": "follow-claude"
+    },
+    "codexPath": {
+      "type": "string",
+      "title": "codex executable",
+      "description": "Path to the codex CLI, or a name found on PATH.",
+      "default": "codex"
+    }
+  }
+}
