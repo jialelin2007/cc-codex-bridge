@@ -12,6 +12,7 @@ import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import http from 'node:http'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 
 const VERSION = '0.1.0'
@@ -97,9 +98,10 @@ class AppServer {
   }
 
   async initialize() {
-    await this.request('initialize', {
+    const result = await this.request('initialize', {
       clientInfo: { name: 'claude-codex-bridge', title: 'Claude Code codex-bridge', version: VERSION },
     })
+    this.codexHome = result?.codexHome
     this.send({ method: 'initialized' })
   }
 
@@ -176,11 +178,56 @@ async function findThreadByName(server, cwd, name) {
   return (listed.data ?? []).find(t => t.name === name)
 }
 
-async function uniqueName(server, cwd, base) {
-  const listed = await server.request('thread/list', { cwd, searchTerm: base, limit: 100, sourceKinds: SOURCE_KINDS })
-  const taken = new Set((listed.data ?? []).map(t => t.name))
-  if (!taken.has(base)) return base
-  for (let n = 2; ; n++) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`
+// Helpers started side by side would pick the same free name: one at a time.
+async function withNameLock(task) {
+  const lock = path.join(os.tmpdir(), `codex-bridge-names-${os.userInfo().uid}.lock`)
+  for (;;) {
+    try {
+      fs.mkdirSync(lock)
+      break
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > 30_000) fs.rmSync(lock, { recursive: true, force: true })
+      } catch {}
+      await new Promise(resolve => setTimeout(resolve, 50 + Math.random() * 100))
+    }
+  }
+  try {
+    return await task()
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true })
+  }
+}
+
+// thread/list leaves out threads that have no turn on disk yet, such as one
+// a helper beside this one named a moment ago; codex's name index has them.
+function indexedNames(codexHome) {
+  try {
+    return fs
+      .readFileSync(path.join(codexHome, 'session_index.jsonl'), 'utf8')
+      .split('\n')
+      .flatMap(line => {
+        try {
+          return [JSON.parse(line).thread_name]
+        } catch {
+          return []
+        }
+      })
+  } catch {
+    return []
+  }
+}
+
+async function nameThread(server, cwd, threadId, base) {
+  return withNameLock(async () => {
+    const listed = await server.request('thread/list', { cwd, searchTerm: base, limit: 100, sourceKinds: SOURCE_KINDS })
+    const taken = new Set([...(listed.data ?? []).map(t => t.name), ...(server.codexHome ? indexedNames(server.codexHome) : [])])
+    let name = base
+    for (let n = 2; taken.has(name); n++) name = `${base}-${n}`
+    await server.request('thread/name/set', { threadId, name })
+    return name
+  })
 }
 
 // `model` is the caller's own choice; `defaultModel` applies to a new thread only.
@@ -211,8 +258,7 @@ async function openThread(server, req) {
     developerInstructions: req.developerInstructions || null,
     ...threadOverrides(req, true),
   })
-  const name = req.name ? await uniqueName(server, req.cwd, req.name) : undefined
-  if (name) await server.request('thread/name/set', { threadId: started.thread.id, name })
+  const name = req.name ? await nameThread(server, req.cwd, started.thread.id, req.name) : undefined
   return { resumed: false, response: started, name }
 }
 

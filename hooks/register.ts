@@ -43,6 +43,7 @@ const spawns = new Map<string, SpawnFacts>()
 const spawnWaiters = new Map<string, () => void>()
 const agentEfforts = new Map<string, string | undefined>()
 const otherAgents = new Set<string>()
+const busyNames = new Map<string, string>()
 
 function describeAgent(options: Options): string {
   const show = (value: string | undefined, fallback: string) => (value && value !== 'inherit' ? value : fallback)
@@ -58,25 +59,31 @@ function describeAgent(options: Options): string {
 
 const isCodexType = ($: $, type: string | undefined) => type === `${$.plugin.name}:${AGENT_NAME}`
 
-async function codexAgent($: $, agentId: string): Promise<{ description: string } | undefined> {
-  const spawned = spawns.get(agentId)
-  if (spawned) return { description: spawned.description }
-  if (otherAgents.has(agentId)) return undefined
-  const info = (await $.agent.list()).find(a => a.id === agentId)
-  if (!info || !isCodexType($, info.type)) {
-    if (info) otherAgents.add(agentId)
-    return undefined
-  }
-  return { description: info.description }
-}
-
 // The first step of a fresh agent can run before its `agent.spawn` hook has
 // heard the agent's id: give that hook a moment.
-async function spawnFacts($: $, agentId: string, description: string): Promise<SpawnFacts> {
-  if (!spawns.has(agentId)) {
-    await Promise.race([new Promise<void>(r => spawnWaiters.set(agentId, r)), $.clock.sleep(3000)])
-    spawnWaiters.delete(agentId)
+async function awaitSpawn($: $, agentId: string) {
+  if (spawns.has(agentId)) return
+  await Promise.race([new Promise<void>(r => spawnWaiters.set(agentId, r)), $.clock.sleep(3000)])
+  spawnWaiters.delete(agentId)
+}
+
+async function codexAgent($: $, agentId: string): Promise<{ description: string } | undefined> {
+  if (otherAgents.has(agentId)) return undefined
+  let spawned = spawns.get(agentId)
+  if (spawned) return { description: spawned.description }
+  const info = (await $.agent.list()).find(a => a.id === agentId)
+  if (info) {
+    if (isCodexType($, info.type)) return { description: info.description }
+    otherAgents.add(agentId)
+    return undefined
   }
+  await awaitSpawn($, agentId)
+  spawned = spawns.get(agentId)
+  return spawned && { description: spawned.description }
+}
+
+async function spawnFacts($: $, agentId: string, description: string): Promise<SpawnFacts> {
+  await awaitSpawn($, agentId)
   return spawns.get(agentId) ?? { description }
 }
 
@@ -123,6 +130,16 @@ async function runCodex(
   const facts = await spawnFacts($, agentId, description)
   const { directive, body } = parseDirective(input)
   const continuing = Boolean(state.threadId) && !directive.fresh
+  // Two agents of this session never drive one codex session at once: claim
+  // the name before the first await.
+  const claim = continuing ? state.sessionName : directive.name !== undefined && !directive.fresh ? sessionName(directive.name) : undefined
+  const holder = claim ? busyNames.get(claim) : undefined
+  if (claim && holder !== undefined && holder !== agentId && !continuing) {
+    directive.fresh = true
+    await notice($, agentId, `codex session ${claim} is busy with agent ${holder}: starting a new one`)
+  } else if (claim) {
+    busyNames.set(claim, agentId)
+  }
   const settings = resolveSettings({
     options,
     directive,
@@ -141,7 +158,7 @@ async function runCodex(
     // An explicit name resumes the codex session that holds it; a name made
     // from the description only labels a new one.
     reuseName: !continuing && directive.name !== undefined && !directive.fresh,
-    developerInstructions: roleInstructions(name),
+    developerInstructions: roleInstructions(),
     input: body.trim() || input,
     controlSocket: socket,
     ...settings,
@@ -173,6 +190,7 @@ async function runCodex(
           thread = event as unknown as ThreadEvent
           state.threadId = thread.threadId
           state.sessionName = thread.name ?? name
+          busyNames.set(state.sessionName, agentId)
           await saveState($, agentId, state)
           const settingsLine = [thread.model, thread.effort].filter(Boolean).join('/')
           await notice(
@@ -192,6 +210,7 @@ async function runCodex(
     }
   } finally {
     state.socket = undefined
+    for (const held of [claim, state.sessionName]) if (held && busyNames.get(held) === agentId) busyNames.delete(held)
   }
 
   const report = final

@@ -1,0 +1,12 @@
+{
+  "name": "claude-codex-bridge",
+  "owner": { "name": "Jiale Lin" },
+  "description": "codex-bridge: OpenAI Codex as a native Claude Code subagent.",
+  "plugins": [
+    {
+      "name": "codex-bridge",
+      "source": "./",
+      "description": "Use OpenAI Codex as a Claude Code subagent through the native Agent, SendMessage, ListAgents and TaskStop tools."
+    }
+  ]
+}
