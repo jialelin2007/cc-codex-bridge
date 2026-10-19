@@ -2,11 +2,13 @@
 // Drives `codex app-server` (JSON-RPC over stdio) for the codex-bridge plugin.
 //
 // Reads one JSON request on stdin and writes JSONL events on stdout:
-//   op "run"    -> thread, turn, progress*, usage*, final   (one codex turn)
-//   op "list"   -> threads                                   (claude-subagent-* threads of a cwd)
-//   op "config" -> config                                    (codex's effective config for a cwd)
-// While a run is in flight, POST /steer {text} or POST /interrupt on the
-// unix socket named by `controlSocket` reaches the running turn.
+//   op "run"    -> ready, thread, turn, (message | command | patch | note | call | steered | usage)*, final
+//   op "list"   -> threads   (claude-subagent-* threads of a cwd)
+//   op "config" -> config    (codex's effective config for a cwd)
+// While a run is in flight, the unix socket named by `controlSocket` takes
+//   POST /steer {text}                     a message from Claude for the running turn
+//   POST /tool-result {callId, text, isError}  the answer to a `call` event
+//   POST /interrupt
 
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
@@ -15,18 +17,41 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-const VERSION = '0.1.0'
+const VERSION = '0.2.0'
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
-const TEXT_LIMIT = 600
+const OUTPUT_LIMIT = 30_000
+const NOTE_LIMIT = 600
 // thread/list only shows interactive sources unless told otherwise.
 const SOURCE_KINDS = ['cli', 'vscode', 'exec', 'appServer', 'unknown']
+
+// The tool codex gets for reaching Claude; the plugin answers it with Claude's
+// own SendMessage, run in the codex agent's loop as a subagent's would be.
+const CLAUDE_TOOLS = [
+  {
+    type: 'function',
+    name: 'send_message',
+    description:
+      'Send a message to Claude, the lead agent that delegated your task (to: "main", the default), or to another agent of the same Claude Code session by its name or id. ' +
+      'Use it to report progress, raise a blocker or ask a question while you keep working; answers arrive as new messages in this conversation. Your final message is still your report.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: 'Recipient: "main" for Claude, or another agent\'s name or id.' },
+        message: { type: 'string', description: 'Plain text; make the first line a self-contained sentence.' },
+        summary: { type: 'string', description: 'A 5-10 word label for the message.' },
+      },
+      required: ['message'],
+      additionalProperties: false,
+    },
+  },
+]
 
 const emit = event => {
   try {
     process.stdout.write(JSON.stringify(event) + '\n')
   } catch {}
 }
-const clip = (text, limit = TEXT_LIMIT) => {
+const clip = (text, limit = NOTE_LIMIT) => {
   const flat = String(text ?? '').trim()
   return flat.length > limit ? flat.slice(0, limit) + '…' : flat
 }
@@ -38,10 +63,11 @@ async function readStdin() {
 }
 
 class AppServer {
-  constructor(codexPath, cwd) {
+  constructor(codexPath, cwd, onRequest) {
     this.nextId = 1
     this.pending = new Map()
     this.listeners = new Set()
+    this.onRequest = onRequest ?? answerServerRequest
     this.child = spawn(codexPath, ['app-server'], { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
     this.stderr = ''
     this.child.stderr.on('data', d => {
@@ -74,7 +100,9 @@ class AppServer {
       if (msg.error) waiter.reject(new Error(msg.error.message ?? JSON.stringify(msg.error)))
       else waiter.resolve(msg.result)
     } else if (msg.method !== undefined && msg.id !== undefined) {
-      this.respond(msg.id, answerServerRequest(msg.method, msg.params))
+      Promise.resolve(this.onRequest(msg.method, msg.params ?? {}))
+        .catch(err => ({ error: { code: -32000, message: err.message } }))
+        .then(answer => this.respond(msg.id, answer))
     } else if (msg.method !== undefined) {
       for (const listener of this.listeners) listener(msg.method, msg.params ?? {})
     }
@@ -100,6 +128,7 @@ class AppServer {
   async initialize() {
     const result = await this.request('initialize', {
       clientInfo: { name: 'claude-codex-bridge', title: 'Claude Code codex-bridge', version: VERSION },
+      capabilities: { experimentalApi: true },
     })
     this.codexHome = result?.codexHome
     this.send({ method: 'initialized' })
@@ -114,7 +143,7 @@ class AppServer {
 }
 
 // Nobody can answer codex's prompts from a Claude subagent: decline them all.
-function answerServerRequest(method, params) {
+function answerServerRequest(method) {
   switch (method) {
     case 'item/commandExecution/requestApproval':
     case 'item/fileChange/requestApproval':
@@ -133,38 +162,142 @@ function answerServerRequest(method, params) {
   }
 }
 
+// `/usr/bin/zsh -lc 'pytest -q'` -> `pytest -q`
+function innerCommand(item) {
+  const actions = item.commandActions ?? []
+  if (actions.length === 1 && actions[0].command) return actions[0].command
+  const wrapped = /^\S+ -l?c '([\s\S]*)'$/.exec(item.command ?? '') ?? /^\S+ -l?c "([\s\S]*)"$/.exec(item.command ?? '')
+  return wrapped ? wrapped[1] : item.command
+}
+
+// The events a finished item becomes: what Claude's transcript shows of it.
 function describeItem(item) {
   switch (item.type) {
     case 'commandExecution': {
-      const seconds = item.durationMs != null ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : ''
-      const outcome =
-        item.status === 'declined' ? 'declined' : item.exitCode != null ? `exit ${item.exitCode}` : item.status
-      return `$ ${clip(item.command, 300)}  → ${outcome}${seconds}`
+      return {
+        type: 'command',
+        id: item.id,
+        command: innerCommand(item),
+        output: truncate(String(item.aggregatedOutput ?? '')),
+        exitCode: item.exitCode ?? null,
+        status: item.status,
+        durationMs: item.durationMs ?? null,
+      }
     }
-    case 'fileChange': {
-      const files = (item.changes ?? []).map(c => `${c.kind?.type ?? 'update'} ${c.path}`)
-      return `✎ ${files.join(', ') || 'files changed'}${item.status === 'completed' ? '' : ` (${item.status})`}`
-    }
+    case 'fileChange':
+      return {
+        type: 'patch',
+        id: item.id,
+        status: item.status,
+        changes: (item.changes ?? []).map(c => ({ path: c.path, kind: c.kind?.type ?? 'update', movePath: c.kind?.move_path ?? null, diff: c.diff ?? '' })),
+      }
     case 'mcpToolCall':
-      return `⚙ ${item.server}.${item.tool} (${item.status})`
-    case 'dynamicToolCall':
-      return `⚙ ${item.tool} (${item.status})`
+      return { type: 'note', text: `Called MCP tool ${item.server}.${item.tool} (${item.status}).` }
     case 'webSearch':
-      return `🔎 ${clip(item.query, 200)}`
+      return { type: 'note', text: `Searched the web: ${clip(item.query, 200)}` }
     case 'collabAgentToolCall':
-      return `👥 ${item.tool}${item.prompt ? `: ${clip(item.prompt, 200)}` : ''}`
+      return { type: 'note', text: `Codex subagent ${item.tool}${item.prompt ? `: ${clip(item.prompt, 300)}` : ''}` }
     case 'imageView':
-      return `🖼 ${item.path}`
+      return { type: 'note', text: `Viewed image ${item.path}` }
     case 'contextCompaction':
-      return '⋯ context compacted'
+      return { type: 'note', text: '(codex compacted its context)' }
     default:
       return undefined
   }
 }
 
+const truncate = output => (output.length > OUTPUT_LIMIT ? output.slice(0, OUTPUT_LIMIT) + '\n… (output truncated)' : output)
+
+// The shell commands a code-mode `exec` script runs, where it spells them out.
+function scriptCommands(script) {
+  const commands = []
+  for (const match of String(script).matchAll(/exec_command\(\s*\{[^}]*?\bcmd\s*:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g)) {
+    const literal = match[1]
+    try {
+      commands.push(literal.startsWith('"') ? JSON.parse(literal) : literal.slice(1, -1).replace(/\\(.)/g, '$1'))
+    } catch {}
+  }
+  return commands
+}
+
+// The JSON objects a script printed back to back (`text(JSON.stringify(r))`).
+function printedObjects(text) {
+  const objects = []
+  let depth = 0
+  let start = -1
+  let quoted = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (quoted) {
+      if (c === '\\') i++
+      else if (c === '"') quoted = false
+    } else if (c === '"') quoted = depth > 0
+    else if (c === '{' && depth++ === 0) start = i
+    else if (c === '}' && depth > 0 && --depth === 0) {
+      try {
+        objects.push(JSON.parse(text.slice(start, i + 1)))
+      } catch {}
+    }
+  }
+  return objects
+}
+
+/**
+ * Reads what codex appends to the thread's rollout file. Code mode runs shell
+ * commands inside an `exec` script, and the app server reports some of them
+ * as no item (a command the sandbox refused, say); the rollout has the script.
+ */
+class RolloutTail {
+  constructor(file) {
+    this.file = file
+    this.rest = Buffer.alloc(0)
+    try {
+      this.offset = fs.statSync(file).size
+    } catch {
+      this.offset = 0
+    }
+  }
+
+  read() {
+    let fd
+    try {
+      fd = fs.openSync(this.file, 'r')
+    } catch {
+      return []
+    }
+    try {
+      const size = fs.fstatSync(fd).size
+      if (size <= this.offset) return []
+      const chunk = Buffer.alloc(size - this.offset)
+      fs.readSync(fd, chunk, 0, chunk.length, this.offset)
+      this.offset = size
+      const bytes = Buffer.concat([this.rest, chunk])
+      const end = bytes.lastIndexOf(0x0a)
+      if (end < 0) {
+        this.rest = bytes
+        return []
+      }
+      this.rest = bytes.subarray(end + 1)
+      return bytes
+        .subarray(0, end)
+        .toString('utf8')
+        .split('\n')
+        .flatMap(line => {
+          try {
+            return [JSON.parse(line)]
+          } catch {
+            return []
+          }
+        })
+    } finally {
+      fs.closeSync(fd)
+    }
+  }
+}
+
 function describePlan(plan) {
   const mark = { completed: '✓', inProgress: '→', pending: '·' }
-  return '📋 plan\n' + plan.map(s => `  ${mark[s.status] ?? '·'} ${s.step}`).join('\n')
+  return 'Plan:\n' + plan.map(s => `${mark[s.status] ?? '·'} ${s.step}`).join('\n')
 }
 
 function shiftEffort(effort, step) {
@@ -256,6 +389,7 @@ async function openThread(server, req) {
   const started = await server.request('thread/start', {
     cwd: req.cwd,
     developerInstructions: req.developerInstructions || null,
+    dynamicTools: req.claudeTools ? CLAUDE_TOOLS : null,
     ...threadOverrides(req, true),
   })
   const name = req.name ? await nameThread(server, req.cwd, started.thread.id, req.name) : undefined
@@ -263,18 +397,87 @@ async function openThread(server, req) {
 }
 
 async function run(req) {
-  const server = new AppServer(req.codexPath || 'codex', req.cwd)
   let threadId
   let turnId
   let finished = false
   let usage
-  let pendingMessage
   let lastMessage = ''
+  let pendingMessage
   let resolveDone
   const done = new Promise(resolve => (resolveDone = resolve))
+  // Messages Claude sent before the turn could take them.
+  const early = []
+  // `call` events waiting for Claude's answer, by codex's call id.
+  const calls = new Map()
+  // Commands the app server reported this turn, and code-mode scripts seen in the rollout.
+  const reported = []
+  const scripts = new Map()
+  let tail
+
+  // A script whose commands the app server did not all report shows as one command.
+  const readRollout = () => {
+    for (const line of tail?.read() ?? []) {
+      const payload = line.type === 'response_item' ? line.payload : undefined
+      if (payload?.type === 'custom_tool_call' && payload.name === 'exec') {
+        scripts.set(payload.call_id, String(payload.input ?? ''))
+        continue
+      }
+      if (payload?.type !== 'custom_tool_call_output' || !scripts.has(payload.call_id)) continue
+      const script = scripts.get(payload.call_id)
+      scripts.delete(payload.call_id)
+      if (!/exec_command\(/.test(script)) continue
+      const commands = scriptCommands(script)
+      const missing = commands.filter(command => {
+        const at = reported.indexOf(command)
+        if (at < 0) return true
+        reported.splice(at, 1)
+        return false
+      })
+      if (commands.length > 0 && missing.length === 0) continue
+      const parts = Array.isArray(payload.output) ? payload.output.map(part => String(part?.text ?? '')) : [String(payload.output ?? '')]
+      if (/^Script \w+/.test(parts[0] ?? '')) parts.shift()
+      const printed = printedObjects(parts.join(''))
+      // Where the script printed each command's result, each shows on its own.
+      const outputs = printed.filter(o => typeof o?.output === 'string')
+      const results = missing.map(
+        (command, i) => outputs.find(o => o.command === command) ?? (outputs.length === missing.length ? outputs[i] : undefined),
+      )
+      if (missing.length > 0 && results.every(Boolean)) {
+        missing.forEach((command, i) =>
+          emit({
+            type: 'command',
+            id: `${payload.call_id}-${i}`,
+            command,
+            output: truncate(results[i].output),
+            exitCode: typeof results[i].exit_code === 'number' ? results[i].exit_code : null,
+            status: 'completed',
+            durationMs: null,
+          }),
+        )
+        continue
+      }
+      emit({
+        type: 'command',
+        id: payload.call_id,
+        command: missing.length > 0 ? missing.join('\n') : script,
+        output: truncate(parts.join('')),
+        exitCode: null,
+        status: 'completed',
+        durationMs: null,
+      })
+    }
+  }
+
+  const server = new AppServer(req.codexPath || 'codex', req.cwd, (method, params) => {
+    if (method !== 'item/tool/call') return answerServerRequest(method)
+    return new Promise(resolve => {
+      calls.set(params.callId, resolve)
+      emit({ type: 'call', callId: params.callId, tool: params.tool, arguments: params.arguments ?? {} })
+    })
+  })
 
   const flushMessage = () => {
-    if (pendingMessage) emit({ type: 'progress', text: `💬 ${clip(pendingMessage)}` })
+    if (pendingMessage) emit({ type: 'message', text: pendingMessage })
     pendingMessage = undefined
   }
 
@@ -289,22 +492,24 @@ async function run(req) {
         if (item?.type === 'agentMessage') {
           flushMessage()
           lastMessage = item.text ?? ''
-          if (item.phase === 'commentary') emit({ type: 'progress', text: `💬 ${clip(lastMessage)}` })
+          if (item.phase === 'commentary') emit({ type: 'message', text: lastMessage })
           else pendingMessage = lastMessage
           break
         }
-        const line = item && describeItem(item)
-        if (line) emit({ type: 'progress', text: line })
+        const event = item && describeItem(item)
+        if (event?.type === 'command') reported.push(event.command)
+        if (event) emit(event)
         break
       }
       case 'turn/plan/updated':
-        if (params.plan?.length) emit({ type: 'progress', text: describePlan(params.plan) })
+        if (params.plan?.length) emit({ type: 'note', text: describePlan(params.plan) })
         break
       case 'thread/tokenUsage/updated':
         usage = params.tokenUsage
+        if (usage?.last) emit({ type: 'usage', last: usage.last })
         break
       case 'error':
-        emit({ type: 'progress', text: `⚠ ${clip(params.error?.message ?? JSON.stringify(params))}` })
+        emit({ type: 'note', text: `⚠ ${clip(params.error?.message ?? JSON.stringify(params))}` })
         break
       case 'turn/completed':
         if (turnId && params.turn?.id !== turnId) break
@@ -313,6 +518,11 @@ async function run(req) {
         break
     }
   })
+
+  const steer = async text => {
+    await server.request('turn/steer', { threadId, expectedTurnId: turnId, input: [{ type: 'text', text, text_elements: [] }] })
+    emit({ type: 'steered', text })
+  }
 
   const interrupt = async () => {
     if (!threadId || !turnId || finished) return
@@ -342,15 +552,21 @@ async function run(req) {
         response.end(JSON.stringify(payload))
       }
       try {
+        const data = JSON.parse(body || '{}')
         if (request.url === '/steer') {
-          const { text } = JSON.parse(body || '{}')
-          if (!threadId || !turnId || finished) return reply(409, { ok: false, reason: 'no active turn' })
-          await server.request('turn/steer', {
-            threadId,
-            expectedTurnId: turnId,
-            input: [{ type: 'text', text, text_elements: [] }],
-          })
-          emit({ type: 'progress', text: `📨 Claude: ${clip(text)}` })
+          if (finished) return reply(409, { ok: false, reason: 'the codex turn has ended' })
+          if (!turnId) {
+            early.push(data.text)
+            return reply(202, { ok: true, queued: true })
+          }
+          await steer(data.text)
+          return reply(200, { ok: true })
+        }
+        if (request.url === '/tool-result') {
+          const answer = calls.get(data.callId)
+          if (!answer) return reply(404, { ok: false })
+          calls.delete(data.callId)
+          answer({ result: { contentItems: [{ type: 'inputText', text: String(data.text ?? '') }], success: !data.isError } })
           return reply(200, { ok: true })
         }
         if (request.url === '/interrupt') {
@@ -362,14 +578,16 @@ async function run(req) {
         reply(500, { ok: false, reason: err.message })
       }
     })
-    control.listen(req.controlSocket)
+    await new Promise(resolve => control.listen(req.controlSocket, resolve))
   }
+  emit({ type: 'ready' })
 
   try {
     await server.initialize()
     const opened = await openThread(server, req)
     const { response } = opened
     threadId = response.thread.id
+    if (response.thread.path) tail = new RolloutTail(response.thread.path)
     const effort =
       req.effort ??
       (req.effortStep ? shiftEffort(req.defaultEffort ?? response.reasoningEffort, req.effortStep) : undefined) ??
@@ -388,20 +606,27 @@ async function run(req) {
       approvalsReviewer: response.approvalsReviewer ?? null,
     })
 
+    const opening = [req.input, ...early.splice(0)]
+    for (const text of opening.slice(1)) emit({ type: 'steered', text })
     const started = await server.request('turn/start', {
       threadId,
-      input: [{ type: 'text', text: req.input, text_elements: [] }],
+      input: opening.map(text => ({ type: 'text', text, text_elements: [] })),
       ...(effort ? { effort } : {}),
     })
     turnId = started.turn.id
     emit({ type: 'turn', turnId })
+    for (const text of early.splice(0)) await steer(text)
 
+    const tailing = setInterval(readRollout, 300)
     const turn = await Promise.race([
       done,
       server.exited.then(({ code, signal }) => {
         throw new Error(`codex app-server exited (${signal ?? code}): ${clip(server.stderr, 400)}`)
       }),
-    ])
+    ]).finally(() => clearInterval(tailing))
+    // The rollout's last lines can land just after the turn's end.
+    await new Promise(resolve => setTimeout(resolve, 200))
+    readRollout()
     const final = pendingMessage ?? lastMessage
     pendingMessage = undefined
     emit({

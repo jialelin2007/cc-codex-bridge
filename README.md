@@ -2,7 +2,7 @@
 
 让 Claude Code 像使用自己的子智能体一样使用 OpenAI Codex，由 Claude 主导协作。
 
-不新增任何给模型调用的工具：codex 子智能体就是一个普通的 agent 类型 `codex-bridge:codex`。Claude 用原生的 **Agent** 启动它，用 **SendMessage** 和它通信（运行中实时注入，结束后续接同一个 codex 会话），用 **ListAgents** 查看它，用 **TaskStop** 中断它，用任务通知和输出文件读取它的结果和过程。
+不新增任何给模型调用的工具：codex 子智能体就是一个普通的 agent 类型 `codex-bridge:codex`。Claude 用原生的 **Agent** 启动它，用 **SendMessage** 和它双向通信（运行中实时注入，结束后续接同一个 codex 会话；codex 也能主动发消息给 Claude），用 **ListAgents** 查看它，用 **TaskStop** 中断它；它的工作过程像原生子智能体一样，以 Bash / Edit / Write 调用的形式出现在记录里。
 
 ## 工作原理
 
@@ -17,11 +17,13 @@ Claude ──Agent(subagent_type: "codex-bridge:codex")──► 原生子智能
                                     thread/start · thread/name/set · turn/start
                                     turn/steer ◄── SendMessage（运行中）
                                     turn/interrupt ◄── TaskStop
+                                    send_message 工具 ──► 子智能体的 SendMessage
 ```
 
 - 插件是一个 Claude Code mod（函数钩子插件）。它注册 agent 类型 `codex-bridge:codex`，并用 `turn.step` 钩子接管这个子智能体的每一次模型请求，改由 codex 回答。Claude 侧不消耗模型 token。
+- **工作过程和原生子智能体一样可见**：codex 执行的每条命令显示为一次 `Bash` 调用（带输出），每处文件改动显示为 `Edit`（带 diff），新建文件显示为 `Write`，codex 的中间说明显示为子智能体的文字。这些调用已经在 codex 里执行过，插件直接用 codex 的结果回答，不会在 Claude 侧再执行一遍。
+- **codex 能主动联系 Claude**：codex 有一个 `send_message` 工具，调用它时插件在子智能体里发起一次真正的 `SendMessage`（默认发给 `main`，也可以发给其他 agent），和原生子智能体发消息完全一样，结果再交回 codex。
 - codex 的回答作为子智能体的最终报告交回。如果当前会话要求子智能体通过 SubagentHandback 交付（例如 auto 模式），就走 SubagentHandback；否则作为子智能体的最后一条文本交回。
-- codex 运行过程中的关键事件（执行的命令和退出码、文件改动、中间消息、计划更新）会写进子智能体记录，显示为系统提示行。你可以在任务列表里打开查看，Claude 也能通过输出文件读取。这些行不进入 Claude 的上下文。
 - 报告末尾附一行 `[codex-bridge] codex session … · thread … · rollout …`，Claude 可以据此读取 codex 的完整 rollout。
 
 ## 用法（Claude 侧）
@@ -49,7 +51,7 @@ prompt 第一行可以写 `@codex` 指令，每个键都可省略，插件解析
 - 不写 `name` 时，会话名由 description 生成，例如 `claude-subagent-修复登录超时`。这种名字只用来标识新会话，重名时自动加后缀，不会续接已有会话。
 - Agent 的 `model` 参数只接受 Claude 模型别名，对 codex 子智能体无效，请用 `@codex model=`。
 - codex 的工作目录和 Claude 相同。Agent 传了 `isolation: "worktree"` 时，codex 在那个 worktree 里工作。
-- 运行中 `SendMessage({to: <agentId>, message})` 会通过 `turn/steer` 立即注入当前 codex 轮次。子智能体结束后再发，会在同一个 codex 线程里开新的一轮。
+- 从子智能体启动到交回报告，`SendMessage({to: <agentId>, message})` 都直接交给 codex：codex 正在跑时通过 `turn/steer` 立即注入；codex 还在启动、这一轮尚未开始时，消息并入第一轮的输入；codex 这一轮刚结束、报告还没交回时，立刻在同一会话里再跑一轮处理它，两轮的报告合并交回。子智能体结束后再发，会在同一个 codex 线程里开新的一轮。
 - `/codex` 斜杠命令列出本项目的 `claude-subagent-*` 会话，并显示当前生效的设置。在 Codex 里可以用 `codex resume claude-subagent-<name>` 打开其中任意一个。
 
 ## 配置（/config）
@@ -104,9 +106,10 @@ claude --plugin-dir /path/to/claude-codex-bridge
 
 ## 已知限制
 
-- codex 不能反过来调用 Claude 的工具（SendMessage、ListAgents 等）。它用自己的工具干活，最后交回一份报告。
+- codex 用自己的工具干活（shell、apply_patch、它自己的 MCP 和 skills）。Claude 侧的权限规则和 PreToolUse 等钩子管不到这些操作，它们只受 codex 的沙箱和审批约束。
+- codex 能用的 Claude 能力只有 `send_message`，对应原生子智能体的 SendMessage；原生子智能体同样没有 ListAgents。
+- codex 的 web 搜索、MCP 调用、计划更新等没有对应的 Claude 工具，在记录里显示为一行文字。
 - `isolation: "remote"` 不适用：远端会话不会加载本机插件。
-- SendMessage 刚好在 codex 轮次开始前或结束后发出时，不会实时注入，而是按普通子智能体的方式排队，由下一轮处理。
 - mod API 和 `codex app-server` 协议都还在演进，升级 Claude Code 或 codex 后如有问题，先运行 `claude plugin validate` 和下面的测试。
 
 ## 开发
@@ -116,7 +119,8 @@ claude plugin validate .      # 校验清单和钩子模块
 claude plugin test .          # 运行 hooks/lib/*.test.ts
 ```
 
-- `hooks/register.ts`：钩子接线。注册 agent 类型和 `/codex`，处理 `turn.step` 接管、`session.send` 实时注入和 `agent.spawn` 参数采集。
+- `hooks/register.ts`：钩子接线。注册 agent 类型和 `/codex`，处理 `turn.step` 接管、镜像工具调用的应答（`tool.call`）、`session.send` 消息投递和 `agent.spawn` 参数采集。
 - `hooks/lib/policy.ts`：`@codex` 指令、会话名、设置优先级、权限映射。
 - `hooks/lib/step.ts`：从子智能体记录判断下一步该做什么，以及报告格式。
-- `bin/codex-agent.mjs`：驱动 `codex app-server` 的 Node helper，提供 run / list / config 三个操作，并在 unix socket 上提供 `/steer` 和 `/interrupt`。
+- `hooks/lib/mirror.ts`：把 codex 的命令和文件改动换成对应的 Bash / Edit / Write 调用及其结果。
+- `bin/codex-agent.mjs`：驱动 `codex app-server` 的 Node helper，提供 run / list / config 三个操作，并在 unix socket 上提供 `/steer`、`/tool-result` 和 `/interrupt`。
