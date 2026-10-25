@@ -1,0 +1,84 @@
+name: Bug report
+description: Something in claude-codex-bridge does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please do not report security problems here; see [SECURITY.md](https://github.com/jialelin2007/claude-codex-bridge/blob/main/SECURITY.md).
+        Issues in English or Chinese are both fine.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you asked Claude to do, what happened, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start Claude Code in ...
+        2. Ask Claude to ...
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      description: Shown by `claude plugin list`.
+      placeholder: "0.2.3"
+    validations:
+      required: true
+  - type: input
+    id: claude-version
+    attributes:
+      label: Claude Code version
+      description: Output of `claude --version`.
+    validations:
+      required: true
+  - type: input
+    id: codex-version
+    attributes:
+      label: codex version
+      description: Output of `codex --version`.
+    validations:
+      required: true
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js version
+      description: Output of `node --version`.
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: codex-command
+    attributes:
+      label: Output of /codex
+      description: Run `/codex` in the Claude Code session where it happened.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant lines from a debug log (`claude --debug-file <path>`) or from the subagent's report. Remove tokens, keys and private paths first.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched the existing issues.
+          required: true
+        - label: "`codex` works on its own in this directory (for example `codex exec \"say hi\"`)."

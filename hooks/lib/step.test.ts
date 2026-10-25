@@ -70,7 +70,7 @@ describe('handbackActive', () => {
 
 describe('reports', () => {
   const thread = {
-    threadId: '01a153cd-1033-7570-ba49-24edd74a18dd',
+    threadId: '01900000-0000-7000-8000-000000000001',
     name: 'claude-subagent-auth-fix',
     resumed: false,
     path: '/home/u/.codex/sessions/rollout.jsonl',

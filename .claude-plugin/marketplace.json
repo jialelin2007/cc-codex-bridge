@@ -1,7 +1,7 @@
 {
   "name": "claude-codex-bridge",
   "owner": { "name": "Jiale Lin" },
-  "description": "codex-bridge: OpenAI Codex as a native Claude Code subagent.",
+  "description": "claude-codex-bridge: OpenAI Codex as a native Claude Code subagent. Installs the codex-bridge plugin.",
   "plugins": [
     {
       "name": "codex-bridge",
