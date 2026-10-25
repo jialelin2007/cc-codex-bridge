@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Drives `codex app-server` (JSON-RPC over stdio) for the codex-bridge plugin.
+// Drives `codex app-server` (JSON-RPC over stdio) for the cc-codex-bridge plugin.
 //
 // Reads one JSON request on stdin and writes JSONL events on stdout:
 //   op "run"    -> ready, thread, turn, (message | command | patch | note | call | steered | usage)*, final
@@ -17,7 +17,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-const VERSION = '0.2.3'
+const VERSION = '0.3.0'
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
 const OUTPUT_LIMIT = 30_000
 const NOTE_LIMIT = 600
@@ -127,7 +127,7 @@ class AppServer {
 
   async initialize() {
     const result = await this.request('initialize', {
-      clientInfo: { name: 'claude-codex-bridge', title: 'Claude Code codex-bridge', version: VERSION },
+      clientInfo: { name: 'cc-codex-bridge', title: 'cc-codex-bridge', version: VERSION },
       capabilities: { experimentalApi: true },
     })
     this.codexHome = result?.codexHome
@@ -158,7 +158,7 @@ function answerServerRequest(method) {
     case 'mcpServer/elicitation/request':
       return { result: { action: 'decline' } }
     default:
-      return { error: { code: -32601, message: `codex-bridge does not handle ${method}` } }
+      return { error: { code: -32601, message: `cc-codex-bridge does not handle ${method}` } }
   }
 }
 
@@ -313,7 +313,7 @@ async function findThreadByName(server, cwd, name) {
 
 // Helpers started side by side would pick the same free name: one at a time.
 async function withNameLock(task) {
-  const lock = path.join(os.tmpdir(), `codex-bridge-names-${os.userInfo().uid}.lock`)
+  const lock = path.join(os.tmpdir(), `cc-codex-bridge-names-${os.userInfo().uid}.lock`)
   for (;;) {
     try {
       fs.mkdirSync(lock)

@@ -70,7 +70,7 @@ describe('handbackActive', () => {
 
 describe('reports', () => {
   const thread = {
-    threadId: '01a153cd-1033-7570-ba49-24edd74a18dd',
+    threadId: '01900000-0000-7000-8000-000000000001',
     name: 'claude-subagent-auth-fix',
     resumed: false,
     path: '/home/u/.codex/sessions/rollout.jsonl',
@@ -86,7 +86,7 @@ describe('reports', () => {
   test('carry a line naming the codex session', () => {
     const report = formatReport({ status: 'completed', text: 'All done.', error: null, usage, lastUsage: null }, thread)
     expect(report).toContain('All done.')
-    expect(report).toContain('[codex-bridge] codex session claude-subagent-auth-fix')
+    expect(report).toContain('[cc-codex-bridge] codex session claude-subagent-auth-fix')
     expect(report).toContain('gpt-6-astra/high · fast')
     expect(threadIdFromReport(report)).toBe(thread.threadId)
   })

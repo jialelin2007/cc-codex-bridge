@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      DISABLE_AUTOUPDATER: '1'
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Validating and testing a plugin needs the CLI but no Claude account.
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@latest && claude --version
+
+      - name: Validate the plugin and marketplace manifests
+        run: claude plugin validate .
+
+      - name: Run the hook tests
+        run: claude plugin test .
+
+      - name: Check the helper parses
+        run: node --check bin/codex-agent.mjs
