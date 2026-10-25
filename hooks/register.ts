@@ -40,8 +40,8 @@ const OUTBOUND: Record<string, string> = { send_message: 'SendMessage' }
 
 // If the bridge ever fails to answer a step, this is what the stand-in model reads.
 const FALLBACK_PROMPT =
-  'You stand in for an OpenAI Codex agent served by the codex-bridge plugin, which failed to take over this turn. ' +
-  'Call no tool. Your whole report is: "codex-bridge error: the Codex bridge did not handle this turn; check that the plugin is loaded and that node and codex are on PATH."'
+  'You stand in for an OpenAI Codex agent served by the cc-codex-bridge plugin, which failed to take over this turn. ' +
+  'Call no tool. Your whole report is: "cc-codex-bridge error: the Codex bridge did not handle this turn; check that the plugin is loaded and that node and codex are on PATH."'
 
 // What the Agent call said that its loop does not: kept from `agent.spawn`.
 type SpawnFacts = { description: string; permissionMode?: string; cwd?: string; effort?: string }
@@ -243,7 +243,7 @@ async function notice($: $, agentId: string, text: string) {
 
 async function controlSocket($: $, agentId: string): Promise<string> {
   const runtime = (await $.env.get('XDG_RUNTIME_DIR')) || '/tmp'
-  return `${runtime}/codex-bridge/${agentId}.sock`
+  return `${runtime}/cc-codex-bridge/${agentId}.sock`
 }
 
 function helperArgv($: $): string[] {
@@ -252,7 +252,7 @@ function helperArgv($: $): string[] {
 
 async function post($: $, socket: string, route: string, body: unknown): Promise<number> {
   try {
-    const sent = await $.http.fetch(`http://codex-bridge${route}`, {
+    const sent = await $.http.fetch(`http://cc-codex-bridge${route}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
@@ -496,7 +496,7 @@ async function* streamRun(
     const thread = runner.thread
     let report = final
       ? formatReport(final, thread)
-      : `⚠ codex-bridge could not run codex: ${failure ?? 'the helper ended without a result'}` +
+      : `⚠ cc-codex-bridge could not run codex: ${failure ?? 'the helper ended without a result'}` +
         (runner.stderr.trim() ? `\n\n${runner.stderr.trim()}` : '')
     if (state.carried) report = `${state.carried}\n\n---\n\n${report}`
 
@@ -546,7 +546,7 @@ async function answerMirrored($: $, e: { tool_use_id: string; agentId?: string }
       throw err
     }
   }
-  if (e.agentId && (await codexAgent($, e.agentId))) return { deny: 'codex-bridge: a codex agent runs no Claude tool of its own.' }
+  if (e.agentId && (await codexAgent($, e.agentId))) return { deny: 'cc-codex-bridge: a codex agent runs no Claude tool of its own.' }
   return run()
 }
 
@@ -577,7 +577,7 @@ export const register: Register = (on, rawOptions) => {
     })
     await $.command.register({
       name: 'codex',
-      description: 'codex-bridge: codex subagent sessions of this project, the settings in force; `order` puts the bridge last',
+      description: 'cc-codex-bridge: codex subagent sessions of this project, the settings in force; `order` puts the bridge last',
       argumentHint: '[order]',
     })
     return next(e)
@@ -592,17 +592,17 @@ export const register: Register = (on, rawOptions) => {
 
   // A mirrored call already ran inside codex: answer it with codex's outcome.
   on('tool.call', { tool: 'Bash' }, ($, e, next) => answerMirrored($, e, next.signal, () => next(e)) as never)
-    .catch(($, e, next) => e.tool_use_id.startsWith(CALL_PREFIX) ? { deny: 'codex-bridge lost the result of this codex call' } : next(e))
+    .catch(($, e, next) => e.tool_use_id.startsWith(CALL_PREFIX) ? { deny: 'cc-codex-bridge lost the result of this codex call' } : next(e))
   on('tool.call', { tool: 'Edit' }, ($, e, next) => answerMirrored($, e, next.signal, () => next(e)) as never)
-    .catch(($, e, next) => e.tool_use_id.startsWith(CALL_PREFIX) ? { deny: 'codex-bridge lost the result of this codex call' } : next(e))
+    .catch(($, e, next) => e.tool_use_id.startsWith(CALL_PREFIX) ? { deny: 'cc-codex-bridge lost the result of this codex call' } : next(e))
   on('tool.call', { tool: 'Write' }, ($, e, next) => answerMirrored($, e, next.signal, () => next(e)) as never)
-    .catch(($, e, next) => e.tool_use_id.startsWith(CALL_PREFIX) ? { deny: 'codex-bridge lost the result of this codex call' } : next(e))
+    .catch(($, e, next) => e.tool_use_id.startsWith(CALL_PREFIX) ? { deny: 'cc-codex-bridge lost the result of this codex call' } : next(e))
 
   // A SendMessage the bridge makes for codex was codex's own decision, which
   // no request of Claude's model carries for auto mode's classifier to judge.
   on('tool.check', { tool: 'SendMessage' }, ($, e, next) => {
     const state = e.agentId ? states.get(e.agentId) : undefined
-    if (e.tool_use_id && state?.calls.has(e.tool_use_id)) return { decision: 'allow', reason: 'codex-bridge: a message from the codex agent' }
+    if (e.tool_use_id && state?.calls.has(e.tool_use_id)) return { decision: 'allow', reason: 'cc-codex-bridge: a message from the codex agent' }
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -696,7 +696,7 @@ export const register: Register = (on, rawOptions) => {
         releaseName(agentId, state)
       }
       if (next.signal.aborted) return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
-      const text = `⚠ codex-bridge failed: ${err instanceof Error ? err.message : String(err)}`
+      const text = `⚠ cc-codex-bridge failed: ${err instanceof Error ? err.message : String(err)}`
       yield { kind: 'text', index: 0, text }
       yield { kind: 'stop', stopReason: 'end_turn', usage: null }
       return { turnId: e.turnId, index: e.index, answer: text, toolUses: [], stopReason: 'end_turn', usage: null }
@@ -745,7 +745,7 @@ export const register: Register = (on, rawOptions) => {
     const threads = (listed?.data ?? []) as { id: string; name: string; model: string | null; updatedAt: number }[]
     const option = (key: keyof Options, fallback = 'inherit') => options[key] || fallback
     const lines = [
-      'codex-bridge settings (/config):',
+      'cc-codex-bridge settings (/config):',
       `  model ${option('model')} · effort ${option('effort')} · fast ${option('fast')} · sandbox ${option('sandbox', 'follow-claude')} · approval ${option('approval', 'follow-claude')}`,
       "codex's own config (what `inherit` means here):",
       `  model ${c.model ?? '?'} · effort ${c.effort ?? '?'} · service tier ${c.serviceTier ?? 'default'} · sandbox ${c.sandbox ?? '?'} · approval ${c.approvalPolicy ?? '?'}`,
@@ -755,8 +755,8 @@ export const register: Register = (on, rawOptions) => {
         : ['  (none yet)']),
       'Open one in Codex: codex resume <name>',
       after.length === 0
-        ? 'Plugin order: codex-bridge comes last, so every mod sees codex tool calls.'
-        : `Plugin order: ${after.join(', ')} come after codex-bridge and see no codex tool calls; /codex order moves it last.`,
+        ? 'Plugin order: cc-codex-bridge comes last, so every mod sees codex tool calls.'
+        : `Plugin order: ${after.join(', ')} come after cc-codex-bridge and see no codex tool calls; /codex order moves it last.`,
     ]
     return { text: lines.join('\n') }
   })

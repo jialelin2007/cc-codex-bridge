@@ -1,11 +1,11 @@
 name: Bug report
-description: Something in claude-codex-bridge does not work as documented.
+description: Something in cc-codex-bridge does not work as documented.
 labels: [bug]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a bug. Please do not report security problems here; see [SECURITY.md](https://github.com/jialelin2007/claude-codex-bridge/blob/main/SECURITY.md).
+        Thanks for reporting a bug. Please do not report security problems here; see [SECURITY.md](https://github.com/jialelin2007/cc-codex-bridge/blob/main/SECURITY.md).
         Issues in English or Chinese are both fine.
   - type: textarea
     id: what-happened
@@ -29,7 +29,7 @@ body:
     attributes:
       label: Plugin version
       description: Shown by `claude plugin list`.
-      placeholder: "0.2.3"
+      placeholder: "0.3.0"
     validations:
       required: true
   - type: input

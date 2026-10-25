@@ -1,14 +1,14 @@
-# claude-codex-bridge
+# cc-codex-bridge
 
-[![CI](https://github.com/jialelin2007/claude-codex-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/jialelin2007/claude-codex-bridge/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/github/package-json/v/jialelin2007/claude-codex-bridge?filename=.claude-plugin%2Fplugin.json&label=version)](.claude-plugin/plugin.json)
+[![CI](https://github.com/jialelin2007/cc-codex-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/jialelin2007/cc-codex-bridge/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/github/package-json/v/jialelin2007/cc-codex-bridge?filename=.claude-plugin%2Fplugin.json&label=version)](.claude-plugin/plugin.json)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 English | [简体中文](README.zh-CN.md)
 
 A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that lets Claude use [OpenAI Codex](https://github.com/openai/codex) the way it uses its own subagents, with Claude leading the work.
 
-It adds no new tools for the model. The codex subagent is an ordinary agent type, `codex-bridge:codex`:
+It adds no new tools for the model. The codex subagent is an ordinary agent type, `cc-codex-bridge:codex`:
 
 - Claude starts it with the native **Agent** tool.
 - **SendMessage** talks to it both ways. A message reaches a running codex turn at once, or continues the same codex session after it finished, and codex can message Claude too.
@@ -45,26 +45,37 @@ Codex does the work with its own model and account, so Claude only writes the br
 In Claude Code:
 
 ```
-/plugin marketplace add jialelin2007/claude-codex-bridge
-/plugin install codex-bridge@claude-codex-bridge
+/plugin marketplace add jialelin2007/cc-codex-bridge
+/plugin install cc-codex-bridge@cc-codex-bridge
 ```
 
 Or from a shell, in one step:
 
 ```sh
-claude plugin install codex-bridge --marketplace jialelin2007/claude-codex-bridge
+claude plugin install cc-codex-bridge --marketplace jialelin2007/cc-codex-bridge
 ```
-
-The repository and marketplace are called `claude-codex-bridge`, but the plugin itself is `codex-bridge`: Claude Code reserves plugin names starting with `claude-` for Anthropic's own.
 
 Start a new Claude Code session afterwards so the hooks load. The plugin's settings page opens once on install; every setting can stay at its default (see [Configuration](#configuration)).
 
 To update or remove it:
 
 ```sh
-claude plugin update codex-bridge@claude-codex-bridge
-claude plugin uninstall codex-bridge@claude-codex-bridge
+claude plugin update cc-codex-bridge@cc-codex-bridge
+claude plugin uninstall cc-codex-bridge@cc-codex-bridge
 ```
+
+### Upgrading from 0.2.x
+
+Version 0.3.0 renamed the repository, the marketplace and the plugin from `claude-codex-bridge` / `codex-bridge` to `cc-codex-bridge`, so the agent type is now `cc-codex-bridge:codex`. An update does not carry the old install over. Reinstall under the new name, then set your options again in `/config` (they are stored per plugin name):
+
+```sh
+claude plugin uninstall codex-bridge@claude-codex-bridge
+claude plugin marketplace remove claude-codex-bridge
+claude plugin marketplace add jialelin2007/cc-codex-bridge
+claude plugin install cc-codex-bridge@cc-codex-bridge
+```
+
+Codex sessions are not affected: `name=` still resumes an existing `claude-subagent-<name>` session. Agents started before the switch cannot be continued with SendMessage afterwards.
 
 ## Quick start
 
@@ -76,7 +87,7 @@ Claude then calls:
 
 ```js
 Agent({
-  subagent_type: "codex-bridge:codex",
+  subagent_type: "cc-codex-bridge:codex",
   description: "Fix failing api tests",
   prompt: "Find out why `npm test` fails in packages/api and fix it. …"
 })
@@ -85,7 +96,7 @@ Agent({
 To have Claude delegate to codex on its own, add a line like this to your `CLAUDE.md`:
 
 ```
-Actively use codex subagents (codex-bridge:codex) for self-contained tasks to save Claude usage.
+Actively use codex subagents (cc-codex-bridge:codex) for self-contained tasks to save Claude usage.
 ```
 
 Run `/codex` to see this project's codex sessions and the settings in effect.
@@ -94,7 +105,7 @@ Run `/codex` to see this project's codex sessions and the settings in effect.
 
 ```js
 Agent({
-  subagent_type: "codex-bridge:codex",
+  subagent_type: "cc-codex-bridge:codex",
   description: "Fix the login timeout",
   effort: "high",                      // optional: codex's reasoning effort
   prompt: "@codex model=gpt-6-astra name=auth-timeout\nFix …"
@@ -128,7 +139,7 @@ The Agent tool's `model` parameter only takes Claude model aliases and has no ef
 - A message sent after the subagent finished starts a new turn in the same codex thread.
 - Codex has a `send_message` tool. When codex calls it, the plugin makes a real `SendMessage` from the subagent (to `main` by default, or to another agent) and hands the result back to codex.
 - `TaskStop` interrupts the running codex turn (`turn/interrupt`).
-- The report ends with a line `[codex-bridge] codex session … · thread … · rollout …`, which Claude can use to read codex's full rollout.
+- The report ends with a line `[cc-codex-bridge] codex session … · thread … · rollout …`, which Claude can use to read codex's full rollout.
 - `/codex` lists this project's `claude-subagent-*` sessions. Open any of them in Codex with `codex resume claude-subagent-<name>`.
 
 ## Configuration
@@ -159,10 +170,10 @@ Nobody can answer codex's approval prompts or questions while it runs as a subag
 
 ## Using it with other mods (plugin order)
 
-Plugin hooks nest in the order of `enabledPlugins` in `settings.json`, earlier ones outside. codex-bridge answers the mirrored tool calls itself, so only mods listed **before** it see them. Monitoring mods such as agent-radar or mission-control need to come first, so codex-bridge should come last:
+Plugin hooks nest in the order of `enabledPlugins` in `settings.json`, earlier ones outside. cc-codex-bridge answers the mirrored tool calls itself, so only mods listed **before** it see them. Monitoring mods such as agent-radar or mission-control need to come first, so cc-codex-bridge should come last:
 
-- The last line of `/codex` tells you the current order and which plugins come after codex-bridge.
-- `/codex order` moves codex-bridge to the end of `enabledPlugins` in `~/.claude/settings.json`. Restart Claude Code to apply it, and run it again after installing new mods.
+- The last line of `/codex` tells you the current order and which plugins come after cc-codex-bridge.
+- `/codex order` moves cc-codex-bridge to the end of `enabledPlugins` in `~/.claude/settings.json`. Restart Claude Code to apply it, and run it again after installing new mods.
 
 With the right order, those mods see a codex subagent the same as a native one: its start and end, every tool call, the command running now, each command's result and duration, and the files it changed.
 
@@ -170,12 +181,12 @@ With the right order, those mods see a codex subagent the same as a native one: 
 
 ```
 Claude
-  │ Agent(subagent_type: "codex-bridge:codex")
+  │ Agent(subagent_type: "cc-codex-bridge:codex")
   ▼
 native subagent loop
   │ each model request (turn.step)
   ▼
-codex-bridge hook: answers it, nothing is sent to Claude's model
+cc-codex-bridge hook: answers it, nothing is sent to Claude's model
   │ node bin/codex-agent.mjs
   ▼
 codex app-server (JSON-RPC) ── codex thread
@@ -185,7 +196,7 @@ codex app-server (JSON-RPC) ── codex thread
   send_message tool  ──► the subagent's SendMessage
 ```
 
-- The plugin is a Claude Code mod (a function-hook plugin). It registers the agent type `codex-bridge:codex` and uses a `turn.step` hook to answer every model request of that subagent with codex instead.
+- The plugin is a Claude Code mod (a function-hook plugin). It registers the agent type `cc-codex-bridge:codex` and uses a `turn.step` hook to answer every model request of that subagent with codex instead.
 - **The work shows like a native subagent's.** Each command codex runs appears as a `Bash` call. It shows up when the command starts and gets its output when it ends, so you can see what a long command is doing. Failed commands show as errors (`Exit code N` plus output), as with native Bash.
   - File changes appear as `Edit` with a diff, and new files as `Write`. Deletes and moves appear as `Bash` with the paths.
   - Codex's progress notes appear as the subagent's text.
@@ -221,15 +232,15 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 - `isolation: "remote"` does not work: remote sessions do not load local plugins.
 - When a codex turn itself fails (for example out of quota, or a model error), the report says why, but monitoring mods show the subagent as finished rather than failed. The mod API has no way yet to end a subagent with an error.
 - Codex reads and searches files through the shell. Those show as `Bash`, not `Read` or `Grep`, so monitoring mods list only the files codex changed.
-- Both the mod API and the `codex app-server` protocol are still changing. If something breaks after upgrading Claude Code or codex, run `claude plugin validate .` and the tests first, then [open an issue](https://github.com/jialelin2007/claude-codex-bridge/issues/new/choose).
+- Both the mod API and the `codex app-server` protocol are still changing. If something breaks after upgrading Claude Code or codex, run `claude plugin validate .` and the tests first, then [open an issue](https://github.com/jialelin2007/cc-codex-bridge/issues/new/choose).
 
 ## Development
 
 Load the plugin from a checkout instead of the marketplace:
 
 ```sh
-git clone https://github.com/jialelin2007/claude-codex-bridge
-claude --plugin-dir ./claude-codex-bridge
+git clone https://github.com/jialelin2007/cc-codex-bridge
+claude --plugin-dir ./cc-codex-bridge
 ```
 
 Check and test it. There is no build step or `npm install`; Claude Code runs the TypeScript hooks directly.

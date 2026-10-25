@@ -1,14 +1,14 @@
-# claude-codex-bridge
+# cc-codex-bridge
 
-[![CI](https://github.com/jialelin2007/claude-codex-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/jialelin2007/claude-codex-bridge/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/github/package-json/v/jialelin2007/claude-codex-bridge?filename=.claude-plugin%2Fplugin.json&label=version)](.claude-plugin/plugin.json)
+[![CI](https://github.com/jialelin2007/cc-codex-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/jialelin2007/cc-codex-bridge/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/github/package-json/v/jialelin2007/cc-codex-bridge?filename=.claude-plugin%2Fplugin.json&label=version)](.claude-plugin/plugin.json)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 [English](README.md) | 简体中文
 
 一个 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 插件：让 Claude 像使用自己的子智能体一样使用 [OpenAI Codex](https://github.com/openai/codex)，由 Claude 主导协作。
 
-插件不给模型新增任何工具，codex 子智能体就是一个普通的 agent 类型 `codex-bridge:codex`：
+插件不给模型新增任何工具，codex 子智能体就是一个普通的 agent 类型 `cc-codex-bridge:codex`：
 
 - Claude 用原生的 **Agent** 启动它。
 - 用 **SendMessage** 和它双向通信：运行中实时注入，结束后续接同一个 codex 会话；codex 也能主动给 Claude 发消息。
@@ -45,26 +45,37 @@
 在 Claude Code 里：
 
 ```
-/plugin marketplace add jialelin2007/claude-codex-bridge
-/plugin install codex-bridge@claude-codex-bridge
+/plugin marketplace add jialelin2007/cc-codex-bridge
+/plugin install cc-codex-bridge@cc-codex-bridge
 ```
 
 或在 shell 里一步完成：
 
 ```sh
-claude plugin install codex-bridge --marketplace jialelin2007/claude-codex-bridge
+claude plugin install cc-codex-bridge --marketplace jialelin2007/cc-codex-bridge
 ```
-
-仓库和 marketplace 名为 `claude-codex-bridge`，插件本身名为 `codex-bridge`：Claude Code 把以 `claude-` 开头的插件名保留给 Anthropic 官方插件。
 
 装好后开一个新的 Claude Code 会话，钩子才会加载。安装时会弹出一次设置页，所有设置都可以保持默认（见[配置](#配置)）。
 
 更新或卸载：
 
 ```sh
-claude plugin update codex-bridge@claude-codex-bridge
-claude plugin uninstall codex-bridge@claude-codex-bridge
+claude plugin update cc-codex-bridge@cc-codex-bridge
+claude plugin uninstall cc-codex-bridge@cc-codex-bridge
 ```
+
+### 从 0.2.x 升级
+
+0.3.0 把仓库、marketplace 和插件都从 `claude-codex-bridge` / `codex-bridge` 改名为 `cc-codex-bridge`，agent 类型随之变为 `cc-codex-bridge:codex`。直接更新不会沿用旧的安装，需要按新名字重装，然后在 `/config` 里重新设置一遍（设置按插件名保存）：
+
+```sh
+claude plugin uninstall codex-bridge@claude-codex-bridge
+claude plugin marketplace remove claude-codex-bridge
+claude plugin marketplace add jialelin2007/cc-codex-bridge
+claude plugin install cc-codex-bridge@cc-codex-bridge
+```
+
+codex 会话不受影响，`name=` 仍会续接已有的 `claude-subagent-<name>` 会话。切换前启动的 agent，切换后不能再用 SendMessage 续接。
 
 ## 快速上手
 
@@ -76,7 +87,7 @@ Claude 会调用：
 
 ```js
 Agent({
-  subagent_type: "codex-bridge:codex",
+  subagent_type: "cc-codex-bridge:codex",
   description: "修复 api 测试",
   prompt: "查一下 packages/api 里 `npm test` 为什么失败，并修好。…"
 })
@@ -85,7 +96,7 @@ Agent({
 想让 Claude 主动把任务交给 codex，可以在 `CLAUDE.md` 里加一行：
 
 ```
-Actively use codex subagents (codex-bridge:codex) for self-contained tasks to save Claude usage.
+Actively use codex subagents (cc-codex-bridge:codex) for self-contained tasks to save Claude usage.
 ```
 
 运行 `/codex` 可以看到本项目的 codex 会话和当前生效的设置。
@@ -94,7 +105,7 @@ Actively use codex subagents (codex-bridge:codex) for self-contained tasks to sa
 
 ```js
 Agent({
-  subagent_type: "codex-bridge:codex",
+  subagent_type: "cc-codex-bridge:codex",
   description: "修复登录超时",
   effort: "high",                      // 可选，映射为 codex 的 reasoning effort
   prompt: "@codex model=gpt-6-astra name=auth-timeout\n修复 …"
@@ -128,7 +139,7 @@ Agent 的 `model` 参数只接受 Claude 模型别名，对 codex 子智能体�
 - 子智能体结束后再发消息，会在同一个 codex 线程里开新的一轮。
 - codex 有一个 `send_message` 工具。codex 调用它时，插件在子智能体里发起一次真正的 `SendMessage`（默认发给 `main`，也可以发给其他 agent），结果再交回 codex。
 - `TaskStop` 中断正在运行的 codex 这一轮（`turn/interrupt`）。
-- 报告末尾附一行 `[codex-bridge] codex session … · thread … · rollout …`，Claude 可以据此读取 codex 的完整 rollout。
+- 报告末尾附一行 `[cc-codex-bridge] codex session … · thread … · rollout …`，Claude 可以据此读取 codex 的完整 rollout。
 - `/codex` 列出本项目的 `claude-subagent-*` 会话。在 Codex 里可以用 `codex resume claude-subagent-<name>` 打开其中任意一个。
 
 ## 配置
@@ -159,10 +170,10 @@ Agent 的 `model` 参数只接受 Claude 模型别名，对 codex 子智能体�
 
 ## 和其他 mod 一起用（插件顺序）
 
-插件的钩子按 settings.json 里 `enabledPlugins` 的顺序嵌套，排在前面的在外层。codex 的镜像工具调用由 codex-bridge 自己作答，所以只有排在它**前面**的 mod 能看到这些调用。agent-radar、mission-control 这类监测子智能体的 mod 要排在前面，也就是 codex-bridge 应当排在最后：
+插件的钩子按 settings.json 里 `enabledPlugins` 的顺序嵌套，排在前面的在外层。codex 的镜像工具调用由 cc-codex-bridge 自己作答，所以只有排在它**前面**的 mod 能看到这些调用。agent-radar、mission-control 这类监测子智能体的 mod 要排在前面，也就是 cc-codex-bridge 应当排在最后：
 
 - `/codex` 的最后一行会说明当前顺序，以及哪些插件排在它后面。
-- `/codex order` 把 codex-bridge 移到 `~/.claude/settings.json` 的 `enabledPlugins` 末尾，重启 Claude Code 后生效。之后再安装新的 mod，可以再运行一次。
+- `/codex order` 把 cc-codex-bridge 移到 `~/.claude/settings.json` 的 `enabledPlugins` 末尾，重启 Claude Code 后生效。之后再安装新的 mod，可以再运行一次。
 
 顺序正确时，这类 mod 看到的 codex 子智能体和原生子智能体一样：启动、结束、每次工具调用、正在运行的命令、命令的成败和耗时、改动的文件。
 
@@ -170,12 +181,12 @@ Agent 的 `model` 参数只接受 Claude 模型别名，对 codex 子智能体�
 
 ```
 Claude
-  │ Agent(subagent_type: "codex-bridge:codex")
+  │ Agent(subagent_type: "cc-codex-bridge:codex")
   ▼
 原生子智能体循环
   │ 每次模型请求（turn.step）
   ▼
-codex-bridge 钩子接管并作答，不发给 Claude 模型
+cc-codex-bridge 钩子接管并作答，不发给 Claude 模型
   │ node bin/codex-agent.mjs
   ▼
 codex app-server（JSON-RPC）── codex 线程
@@ -185,7 +196,7 @@ codex app-server（JSON-RPC）── codex 线程
   send_message 工具  ──► 子智能体的 SendMessage
 ```
 
-- 插件是一个 Claude Code mod（函数钩子插件）。它注册 agent 类型 `codex-bridge:codex`，用 `turn.step` 钩子接管这个子智能体的每一次模型请求，改由 codex 回答。
+- 插件是一个 Claude Code mod（函数钩子插件）。它注册 agent 类型 `cc-codex-bridge:codex`，用 `turn.step` 钩子接管这个子智能体的每一次模型请求，改由 codex 回答。
 - **工作过程和原生子智能体一样可见。** codex 执行的每条命令显示为一次 `Bash` 调用：命令一开始就出现，跑完时填入输出，所以长命令运行期间能看到它正在跑什么。失败的命令和原生 Bash 一样显示为错误（`Exit code N` 加输出）。
   - 文件改动显示为带 diff 的 `Edit`，新建文件显示为 `Write`，删除和移动显示为带路径的 `Bash`。
   - codex 的中间说明显示为子智能体的文字。
@@ -221,15 +232,15 @@ Claude 侧仍有的消耗：
 - `isolation: "remote"` 不适用：远端会话不会加载本机插件。
 - codex 这一轮本身失败时（例如额度用完、模型报错），报告里会写明失败原因，但子智能体在监测 mod 里显示为「完成」而不是「失败」：mod API 目前没有让子智能体以错误结束的方式。
 - codex 用 shell 读文件、搜索时显示为 `Bash`，不会换成 `Read`、`Grep`，所以监测 mod 的文件列表里只有 codex 改动过的文件。
-- mod API 和 `codex app-server` 协议都还在演进。升级 Claude Code 或 codex 后如有问题，先运行 `claude plugin validate .` 和测试，再[提交 issue](https://github.com/jialelin2007/claude-codex-bridge/issues/new/choose)。
+- mod API 和 `codex app-server` 协议都还在演进。升级 Claude Code 或 codex 后如有问题，先运行 `claude plugin validate .` 和测试，再[提交 issue](https://github.com/jialelin2007/cc-codex-bridge/issues/new/choose)。
 
 ## 开发
 
 从本地目录加载插件，而不是从 marketplace 安装：
 
 ```sh
-git clone https://github.com/jialelin2007/claude-codex-bridge
-claude --plugin-dir ./claude-codex-bridge
+git clone https://github.com/jialelin2007/cc-codex-bridge
+claude --plugin-dir ./cc-codex-bridge
 ```
 
 校验和测试。没有构建步骤，也不需要 `npm install`，Claude Code 直接运行 TypeScript 钩子。

@@ -39,7 +39,7 @@ export function lastReport(rows: readonly Row[]): string | undefined {
   for (let i = rows.length - 1; i >= 0; i--) {
     const use = rows[i]!.toolUses.find(u => u.tool === HANDBACK)
     if (use && typeof use.input.message === 'string') return use.input.message
-    if (rows[i]!.role === 'assistant' && rows[i]!.text.includes('[codex-bridge]')) return rows[i]!.text
+    if (rows[i]!.role === 'assistant' && rows[i]!.text.includes('[cc-codex-bridge]')) return rows[i]!.text
   }
   return undefined
 }
@@ -124,7 +124,7 @@ export function threadLine(thread: ThreadEvent, usage: Usage | null): string {
     )
   }
   if (thread.path) parts.push(`rollout ${thread.path}`)
-  return `[codex-bridge] ${parts.join(' · ')}`
+  return `[cc-codex-bridge] ${parts.join(' · ')}`
 }
 
 export function formatReport(final: FinalEvent, thread: ThreadEvent | undefined): string {
@@ -136,7 +136,7 @@ export function formatReport(final: FinalEvent, thread: ThreadEvent | undefined)
   return thread ? `${report}\n\n${threadLine(thread, final.usage)}` : report
 }
 
-/** The thread id a report's `[codex-bridge]` line names, for a run that lost its state. */
+/** The thread id a report's `[cc-codex-bridge]` line names, for a run that lost its state. */
 export function threadIdFromReport(report: string | undefined): string | undefined {
-  return report?.match(/\[codex-bridge\][^\n]*\bthread ([0-9a-f-]{36})/)?.[1]
+  return report?.match(/\[cc-codex-bridge\][^\n]*\bthread ([0-9a-f-]{36})/)?.[1]
 }

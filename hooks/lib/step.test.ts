@@ -86,7 +86,7 @@ describe('reports', () => {
   test('carry a line naming the codex session', () => {
     const report = formatReport({ status: 'completed', text: 'All done.', error: null, usage, lastUsage: null }, thread)
     expect(report).toContain('All done.')
-    expect(report).toContain('[codex-bridge] codex session claude-subagent-auth-fix')
+    expect(report).toContain('[cc-codex-bridge] codex session claude-subagent-auth-fix')
     expect(report).toContain('gpt-6-astra/high · fast')
     expect(threadIdFromReport(report)).toBe(thread.threadId)
   })

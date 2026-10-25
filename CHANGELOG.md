@@ -2,11 +2,15 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0] - 2026-10-25
+
+### Changed
+
+- **Breaking:** the repository, the marketplace and the plugin are all renamed to `cc-codex-bridge` (from `claude-codex-bridge` and `codex-bridge`). The agent type is now `cc-codex-bridge:codex`, and reports end with a `[cc-codex-bridge]` line. Reinstall under the new name and set your options again; see [Upgrading from 0.2.x](README.md#upgrading-from-02x).
 
 ### Added
 
-- The project is open source under the MIT License, as claude-codex-bridge. The plugin keeps the name `codex-bridge`, since Claude Code reserves plugin names starting with `claude-`.
+- The project is open source under the MIT License.
 - An English README with a Chinese translation, contribution and security guides, a code of conduct, issue and pull request templates, and CI that validates and tests the plugin.
 - `license`, `homepage` and `repository` in the plugin manifest.
 
@@ -61,9 +65,9 @@ All notable changes to this project are documented here. The format follows [Kee
 - Reports are delivered with or without SubagentHandback.
 - The `/codex` command, plugin settings in `/config`, and a marketplace manifest.
 
-[Unreleased]: https://github.com/jialelin2007/claude-codex-bridge/compare/7521856...HEAD
-[0.2.3]: https://github.com/jialelin2007/claude-codex-bridge/compare/16d8548...7521856
-[0.2.2]: https://github.com/jialelin2007/claude-codex-bridge/compare/52b4d36...16d8548
-[0.2.1]: https://github.com/jialelin2007/claude-codex-bridge/compare/d8e292e...52b4d36
-[0.2.0]: https://github.com/jialelin2007/claude-codex-bridge/compare/1dd4529...d8e292e
-[0.1.0]: https://github.com/jialelin2007/claude-codex-bridge/commits/1dd4529
+[0.3.0]: https://github.com/jialelin2007/cc-codex-bridge/compare/7521856...HEAD
+[0.2.3]: https://github.com/jialelin2007/cc-codex-bridge/compare/16d8548...7521856
+[0.2.2]: https://github.com/jialelin2007/cc-codex-bridge/compare/52b4d36...16d8548
+[0.2.1]: https://github.com/jialelin2007/cc-codex-bridge/compare/d8e292e...52b4d36
+[0.2.0]: https://github.com/jialelin2007/cc-codex-bridge/compare/1dd4529...d8e292e
+[0.1.0]: https://github.com/jialelin2007/cc-codex-bridge/commits/1dd4529
